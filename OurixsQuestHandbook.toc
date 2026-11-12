@@ -1,0 +1,38 @@
+## Interface: 16001
+## Title: Ourix's Quest Handbook
+## Notes: View quest chain relationships and details, showing each quest's current state.
+## Notes-zhCN: 查看任务链关系和具体信息，显示当前的任务状态。
+## Notes-zhTW: 查看任務鏈關係和具體資訊，顯示目前的任務狀態。
+## IconTexture: Interface\AddOns\OurixsQuestHandbook\Media\Icon.png
+## Author: Ourixs
+## Version: 1.0.0
+## DefaultState: enabled
+## SavedVariables: OurixsQuestHandbookDB
+## SavedVariablesPerCharacter: OurixsQuestHandbookCharDB
+## Dependencies: QuestieDB
+## X-Runtime-Dependencies: QuestieDB
+
+# Coordinate table only (AreaTable -> UiMapID). Not quest business data.
+Core\AreaMap.lua
+
+# Core: all pure native API wrappers, no libraries.
+Core\Locale.lua
+Core\QuestAPI.lua
+Core\DataSource.lua
+Core\Rewards.lua
+Core\Collector.lua
+Core\Chains.lua
+Core\MapLink.lua
+
+# UI: plain CreateFrame widgets, no Ace / LibDBIcon / etc.
+UI\Widgets.lua
+UI\QuestTooltip.lua
+UI\CategoryTree.lua
+UI\ChainView.lua
+UI\MainWindow.lua
+UI\MinimapButton.lua
+UI\NpcChainPanel.lua
+UI\SharePanel.lua
+
+# Must be last: SavedVariables, events, slash commands, NPC panel hooks.
+Core\Init.lua

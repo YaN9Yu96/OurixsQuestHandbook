@@ -1,0 +1,18 @@
+# Local development notes — not addon code, do not publish
+.workbuddy/
+
+# A development-only copy of the QuestieDB library. QuestieDB is its own addon and its own
+# repository; this addon only depends on it at runtime.
+QuestieDB/
+
+# Packaged releases
+*.zip
+*.7z
+*.rar
+
+# OS / editor junk
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*~
