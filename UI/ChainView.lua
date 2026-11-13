@@ -8,12 +8,23 @@ local WHITE = "Interface\\Buttons\\WHITE8X8"
 -- Our own generated circle (a white disk that fills the texture edge to edge). The chain
 -- nodes are drawn with it so they read as round dots rather than squares.
 local ROUND = "Interface/AddOns/OurixsQuestHandbook/Media/Round.png"
+-- Solid right-pointing white triangle; mirrored on the fly for the left-pointing marker.
+local TRIANGLE = "Interface/AddOns/OurixsQuestHandbook/Media/Triangle.png"
 local ROW_H, PAD, GAP = 30, 9, 12
--- The spine sits 5px further right than before, so the stub that reaches left of it (an
--- external prerequisite) has more room and is easier to see.
-local TRUNK_X, INDENT = 21, 18
+-- The spine sits well right of the panel edge so the stub reaching left of it has a real
+-- gutter: the ">" glyph must clear the status dot (not overlap it), and the two glyphs must
+-- stay apart when a quest both needs an external prerequisite and feeds an external
+-- follow-up.
+local TRUNK_X, INDENT = 30, 18
 local NODE_X = TRUNK_X + INDENT
 local CENTER = ROW_H / 2
+-- Solid triangle markers sit just left of the node with NO connecting line. A right-pointing
+-- triangle = this quest has an external prerequisite (something feeds in); the same texture
+-- mirrored to point left = this quest has an external follow-up (this feeds another). They
+-- are sized to read as small standalone markers rather than as part of the spine.
+local TRI_W, TRI_H = 7, 8
+local TRI_IN_X = TRUNK_X - 10   -- right-pointing (external prerequisite), clear of the dot
+local TRI_OUT_X = TRUNK_X - 19  -- left-pointing (external follow-up) when both are shown
 -- A row costs about a dozen frames, and a chain page can be sixty of them. A tall page is
 -- created a few rows at a time on a C_Timer ticker, so the player watches it fill in from
 -- top to bottom -- a deliberate "loading" animation. Nothing is pre-built and nothing is
@@ -347,13 +358,20 @@ local function acquire(f, i)
     row.dot:SetTexture(ROUND)
     row.dot:SetSize(8, 8)
 
-    -- Stub reaching left of the chain spine: marks a quest whose prerequisite lives
-    -- outside this chain (another chain, another page, or a quest not in the list).
-    -- Hidden unless the row actually has such a prerequisite.
-    row.leftArm = row:CreateTexture(nil, "ARTWORK")
-    row.leftArm:SetTexture(WHITE)
-    row.leftArm:SetVertexColor(TH.accentDim[1], TH.accentDim[2], TH.accentDim[3], 0.9)
-    row.leftArm:Hide()
+    -- Solid triangle markers for cross-chain dependencies (no connecting line).
+    -- triPre points right ("an external quest feeds this one"); triPost is the same texture
+    -- mirrored horizontally to point left ("this quest feeds an external quest").
+    row.triPre = row:CreateTexture(nil, "ARTWORK")
+    row.triPre:SetTexture(TRIANGLE)
+    row.triPre:SetSize(TRI_W, TRI_H)
+    row.triPre:SetVertexColor(TH.accentDim[1], TH.accentDim[2], TH.accentDim[3], 0.95)
+    row.triPre:Hide()
+    row.triPost = row:CreateTexture(nil, "ARTWORK")
+    row.triPost:SetTexture(TRIANGLE)
+    row.triPost:SetTexCoord(1, 0, 0, 1)
+    row.triPost:SetSize(TRI_W, TRI_H)
+    row.triPost:SetVertexColor(TH.accentDim[1], TH.accentDim[2], TH.accentDim[3], 0.95)
+    row.triPost:Hide()
 
     row.title = W.Font(row, "GameFontNormal")
     row.title:SetJustifyH("LEFT")
@@ -460,28 +478,50 @@ local function paintRow(view, row, item, selectedId, rightReserve)
         row.dot:SetVertexColor(CARD[1], CARD[2], CARD[3], 1)
     end
 
-    -- External prerequisite stub: a prerequisite not part of this quest's own chain is
-    -- drawn as a short line reaching left of the chain spine (the in-chain arm reaches
-    -- right, so the two directions never read the same). Search hits each sit in their
-    -- own one-quest "chain", so the flag is suppressed there to avoid a stub on every row.
-    if q.pre and item.chainSet and not item.search then
-        local external = false
+    -- External dependency stub: a prerequisite (or a follower) that lives outside this
+    -- quest's own chain. The in-chain spine already shows chain-internal links, so only
+    -- cross-chain ones earn the stub. ">" at the right end points into the node = something
+    -- feeds this quest (external prerequisite); "<" at the left end points away = this quest
+    -- feeds another (external follow-up). Search hits each sit in their own one-quest
+    -- "chain", so the flag is suppressed there to avoid a stub on every row.
+    -- The mark must only promise a jump that exists: an id the database does not know
+    -- cannot be navigated to, so it earns no triangle.
+    local questsById = ns.Source.quests
+    local hasExtPre, hasExtPost = false, false
+    if q.pre and item.chainSet and questsById and not item.search then
         for _, p in ipairs(q.pre) do
-            if type(p) == "number" and not item.chainSet[p] then
-                external = true
+            if type(p) == "number" and p ~= q.id and questsById[p] and not item.chainSet[p] then
+                hasExtPre = true
                 break
             end
         end
-        if external then
-            row.leftArm:ClearAllPoints()
-            row.leftArm:SetPoint("TOPLEFT", row, "TOPLEFT", 6, -CENTER)
-            row.leftArm:SetSize(TRUNK_X - 0.5 - 6, 1)
-            row.leftArm:Show()
-        else
-            row.leftArm:Hide()
+    end
+    if ns.Source.post and item.chainSet and questsById and not item.search then
+        for _, f in ipairs(ns.Source.post[q.id] or {}) do
+            if type(f) == "number" and f ~= q.id and questsById[f] and not item.chainSet[f] then
+                hasExtPost = true
+                break
+            end
         end
+    end
+    -- Right-pointing triangle = external prerequisite, sat just left of the node with a small
+    -- gap so it never overlaps the dot. Hidden when there is no external prerequisite.
+    if hasExtPre then
+        row.triPre:ClearAllPoints()
+        row.triPre:SetPoint("CENTER", row, "TOPLEFT", TRI_IN_X, -CENTER)
+        row.triPre:Show()
     else
-        row.leftArm:Hide()
+        row.triPre:Hide()
+    end
+    -- Left-pointing triangle = external follow-up. When both show, it slides further left so
+    -- the two triangles keep a clear gap; on its own it sits next to the node.
+    if hasExtPost then
+        row.triPost:ClearAllPoints()
+        row.triPost:SetPoint("CENTER", row, "TOPLEFT",
+            hasExtPre and TRI_OUT_X or (TRUNK_X - 13), -CENTER)
+        row.triPost:Show()
+    else
+        row.triPost:Hide()
     end
 
     local level = ns.Q.Level(q.id, q.level)
@@ -547,8 +587,13 @@ local function paintRow(view, row, item, selectedId, rightReserve)
             -- Silent when there is nothing to jump to: the tooltip does not
             -- advertise the action in that case either, so a message here would
             -- be the only feedback for something the player was never offered.
-            local pre = ns.Chains.PreJumpTarget(q)
-            if pre then ns.Main:FocusQuest(pre.id) end
+            if IsShiftKeyDown and IsShiftKeyDown() then
+                local post = ns.Chains.PostJumpTarget(q, item.chainSet)
+                if post then ns.Main:FocusQuest(post.id) end
+            else
+                local pre = ns.Chains.PreJumpTarget(q, item.chainSet)
+                if pre then ns.Main:FocusQuest(pre.id) end
+            end
             return
         end
         -- Shift+click is the "hand this quest to the native log" shortcut, and it

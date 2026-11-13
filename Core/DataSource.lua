@@ -773,6 +773,23 @@ function S.Build(force)
         baseQuests, baseEntries = buildBase()
     end
     S.quests, S.entries = baseQuests, baseEntries
+    -- Reverse dependency index: post[id] = { follower quest ids }. Lets a row ask "which
+    -- quests depend on this one" without scanning the whole table. It mirrors pre (the
+    -- inverted next-in-chain / child edges are already folded into pre), so a chain's own
+    -- children appear here too and the row filters them out via its chainSet.
+    local post = {}
+    for id, qq in pairs(baseQuests) do
+        if qq and qq.pre then
+            for _, p in ipairs(qq.pre) do
+                if type(p) == "number" then
+                    local list = post[p]
+                    if not list then list = {}; post[p] = list end
+                    list[#list + 1] = id
+                end
+            end
+        end
+    end
+    S.post = post
     S.byId = {}
     for _, e in ipairs(baseEntries) do S.byId[e.id] = e end
     built = true

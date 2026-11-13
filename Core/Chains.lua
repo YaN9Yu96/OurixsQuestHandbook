@@ -408,18 +408,24 @@ end
 -- faction's tab, which is an inspection view (see C.Inspecting): every quest listed
 -- there is race-locked to that side, so keeping the gate would leave nothing but the
 -- faction-neutral quests on screen and the "not yours" capsules would never appear.
-function C.Visible(q, faction)
-    if not q then return false end
+-- Returns nil when the quest passes, or the name of the gate that stopped it.
+local function viewGate(q, faction)
+    if not q then return "missing" end
     if q.faction and q.faction ~= faction then
-        return false
+        return "faction"
     end
     if not C.Inspecting(faction) and not C.ShowAllRaces() and not C.RaceAllowed(q) then
-        return false
+        return "race"
     end
     if not C.ShowAllClasses() and not C.ClassAllowed(q) then
-        return false
+        return "class"
     end
-    return true
+    return nil
+end
+
+function C.Visible(q, faction)
+    if not q then return false end
+    return viewGate(q, faction or ns.faction) == nil
 end
 
 function C.EntryAllowed(e)
@@ -428,6 +434,24 @@ function C.EntryAllowed(e)
         if pc and e.classKey ~= pc then return false end
     end
     return true
+end
+
+-- Why the list cannot show this quest right now, or nil when it can: the browse gate
+-- ("faction" / "race" / "class") plus the "hide completed" list filter ("done"), which
+-- C.Visible deliberately leaves out because the progress counters count finished quests
+-- too. The dependency triangles are drawn from the raw edge, so a marked row can point at
+-- a quest no page renders; FocusQuest asks this and explains the refusal instead of
+-- dropping the action silently.
+function C.HiddenReason(q, faction)
+    local why = viewGate(q, faction or ns.faction)
+    if why then return why end
+    if ns.char and ns.char.hideCompleted and ns.Q.Done(q.id) then return "done" end
+    return nil
+end
+
+-- Boolean form for callers that only branch on "shown or not".
+function C.HiddenByFilter(q, faction)
+    return C.HiddenReason(q, faction) ~= nil
 end
 
 -- Quests currently tracked in the player's log, collected in a single pass. On this
@@ -599,25 +623,60 @@ local function questSorter(a, b)
     return a.id < b.id
 end
 
--- The predecessor the "jump to previous quest" action can actually reach. A raw
--- prerequisite id is not enough: the quest behind it may be missing from the
--- database, belong to the other faction or another class (and therefore be filtered
--- out of the list right now), or be hidden by "hide completed". In all of those
--- cases the jump has nowhere to land, so the row behaves as if it had no previous
--- quest at all -- no hint in the tooltip and no action on right click.
-function C.PreJumpTarget(q)
+-- The predecessor the "jump to previous quest" action can reach. Only prerequisites
+-- OUTSIDE the quest's current chain count: an in-chain parent is already drawn on the
+-- spine and listed on the page, so jumping to it is redundant -- right click is reserved
+-- for the cross-chain hop the stub marks.
+--
+-- A candidate the list cannot show right now (other faction, race or class gate, hidden
+-- completed) is still returned when it is the only edge: the triangle and the tooltip
+-- list the raw dependency either way, and swallowing the action entirely is what made
+-- marked rows look broken. FocusQuest turns that case into a one-line explanation. A
+-- shown candidate always wins over a filtered one, so the jump lands on a real row
+-- whenever one exists.
+function C.PreJumpTarget(q, chainSet)
     if not q or not q.pre then return nil end
-    local faction = ns.faction
-    local hideDone = ns.char and ns.char.hideCompleted
+    local filtered = nil
     for _, p in ipairs(q.pre) do
-        if type(p) == "number" and p ~= q.id then
+        if type(p) == "number" and p ~= q.id and not (chainSet and chainSet[p]) then
             local pq = ns.Source.Get(p)
-            if pq and C.Visible(pq, faction) and not (hideDone and ns.Q.Done(p)) then
-                return pq
+            if pq then
+                if not C.HiddenByFilter(pq) then return pq end
+                filtered = filtered or pq
             end
         end
     end
-    return nil
+    return filtered
+end
+
+-- The follower the "shift+right-click to jump forward" action can reach. The inverse of
+-- PreJumpTarget: only followers OUTSIDE this quest's own chain are considered, because an
+-- in-chain child is already drawn on the spine and needs neither a hint nor a jump. Among
+-- the candidates a currently shown one wins (lowest level, then id); a filtered one is
+-- returned only when it is the sole edge, so the marker keeps its meaning and FocusQuest
+-- can explain why the jump refuses.
+function C.PostJumpTarget(q, chainSet)
+    local post = ns.Source.post
+    if not q or not post then return nil end
+    local shown, shownLevel, hidden, hiddenLevel = nil, nil, nil, nil
+    for _, f in ipairs(post[q.id] or {}) do
+        if type(f) == "number" and f ~= q.id and not (chainSet and chainSet[f]) then
+            local fq = ns.Source.Get(f)
+            if fq then
+                local lvl = fq.minLevel or fq.level or 999
+                if C.HiddenByFilter(fq) then
+                    if not hidden or lvl < hiddenLevel
+                        or (lvl == hiddenLevel and f < hidden.id) then
+                        hidden, hiddenLevel = fq, lvl
+                    end
+                elseif not shown or lvl < shownLevel
+                    or (lvl == shownLevel and f < shown.id) then
+                    shown, shownLevel = fq, lvl
+                end
+            end
+        end
+    end
+    return shown or hidden
 end
 
 -- A "chain" is one root plus everything reachable from it. Only the root is

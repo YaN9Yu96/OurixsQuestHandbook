@@ -116,6 +116,54 @@ local function addPrerequisites(tt, q)
     end
 end
 
+-- One follower per line: quest name on the left, its state on the right. Only followers
+-- OUTSIDE the quest's own chain are listed -- an in-chain child is already on the spine, so
+-- repeating it here would just duplicate the list the player is looking at.
+local function addFollowUps(tt, q, chainSet)
+    local post = ns.Source.post
+    if type(post) ~= "table" then return end
+    local rows = {}
+    for _, fid in ipairs(post[q.id] or {}) do
+        if type(fid) == "number" and fid ~= q.id then
+            if chainSet and chainSet[fid] then
+                -- in-chain child: drawn on the spine already; skip
+            else
+                rows[#rows + 1] = { id = fid, q = ns.Source.Get(fid) }
+            end
+        end
+    end
+    if #rows == 0 then return end
+    table.sort(rows, function(a, b)
+        local al = (a.q and (a.q.minLevel or a.q.level)) or 999
+        local bl = (b.q and (b.q.minLevel or b.q.level)) or 999
+        if al ~= bl then return al < bl end
+        return a.id < b.id
+    end)
+    sectionHeader(tt, ns.L["Follow-ups"])
+    for i, row in ipairs(rows) do
+        if i > MAX_PRE_LINES then
+            tt:AddLine(ns.L["%d more follow-ups"]:format(#rows - MAX_PRE_LINES), 0.55, 0.62, 0.70)
+            break
+        end
+        local fid, fq = row.id, row.q
+        if fq then
+            local status = ns.Chains.Status(fq, nil)
+            local r, g, b = ns.Q.StatusColor(status)
+            local name = ns.Q.CachedTitle(fid) or fq.titleFallback
+                or (ns.L["Quest #%d"]:format(fid))
+            local state = ns.Chains.StatusLabel(fq, nil)
+            if tt.AddDoubleLine then
+                tt:AddDoubleLine(name, state, r, g, b, r * 0.8, g * 0.8, b * 0.8)
+            else
+                tt:AddLine(name .. "  " .. state, r, g, b)
+            end
+        else
+            tt:AddLine(ns.L["Quest #%d"]:format(fid) .. "  " .. ns.L["Details unavailable"],
+                0.48, 0.46, 0.44)
+        end
+    end
+end
+
 function T.Show(owner, q, item, readOnly)
     if not owner or not q then return end
     local tt = GameTooltip
@@ -145,6 +193,8 @@ function T.Show(owner, q, item, readOnly)
 
     -- Which quests have to be done first, and where each one stands right now.
     addPrerequisites(tt, q)
+    -- What this quest unlocks elsewhere (follow-ups outside its own chain).
+    addFollowUps(tt, q, item and item.chainSet)
 
     -- Where and when the quest can be picked up. The header only appears when there is
     -- something under it: a bare "接取条件：" hanging over the data-origin line would be a
@@ -183,11 +233,16 @@ function T.Show(owner, q, item, readOnly)
         if markLoc then
             tt:AddLine(ns.L["Left-click: mark start on map"], 0.55, 0.62, 0.70)
         end
-        -- Only offer the jump when there is actually somewhere to jump to: a raw
-        -- prerequisite id whose quest is filtered out, missing or hidden is not a place
-        -- the player can be taken to, so the hint stays away.
-        if ns.Chains.PreJumpTarget(q) then
+        -- Offer the jump whenever the edge exists AND it is outside the current chain (an
+        -- in-chain parent is already on the spine, so it needs neither hint nor action).
+        -- A target the filters currently hide still gets the hint: the click answers with
+        -- the gate name, which is more useful than a row that visibly marks a dependency
+        -- and then swallows the click.
+        if ns.Chains.PreJumpTarget(q, item and item.chainSet) then
             tt:AddLine(ns.L["Right-click: jump to previous"], 0.55, 0.62, 0.70)
+        end
+        if ns.Chains.PostJumpTarget(q, item and item.chainSet) then
+            tt:AddLine(ns.L["Shift+right-click: jump to follow-up"], 0.55, 0.62, 0.70)
         end
         if ns.Q.Active(q.id) then
             tt:AddLine(ns.L["Shift+Click: open quest log"], 0.55, 0.62, 0.70)

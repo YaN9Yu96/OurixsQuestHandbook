@@ -337,17 +337,67 @@ end
 
 -- Right-click on a quest jumps to its prerequisite, switching pages when the
 -- prerequisite belongs to another entry.
+--
+-- The dependency triangle is drawn from the raw edge, so the target can be a quest the
+-- current filters keep off every page (other faction tab, race or class gate, or a
+-- completed quest while "hide completed" is on). That used to end in a silent no-op; name
+-- the gate instead, so the row always answers the click.
+local JUMP_REFUSED = {
+    faction = "Cannot jump: other faction",
+    race = "Cannot jump: other race",
+    class = "Cannot jump: other class",
+    done = "Cannot jump: completed",
+}
 function M:FocusQuest(id)
     if not id then return end
+    local target = ns.Source.Get(id)
+    if not target then
+        ns.Print(ns.L["Cannot jump: target is filtered out"])
+        return
+    end
+    local why = ns.Chains.HiddenReason(target)
+    -- A cross-faction dependency is only unreachable because of the tab we are on: the
+    -- other side is an inspection view, where the race gate no longer applies either. Flip
+    -- the tab when that alone makes the quest visible, and put it back when it does not --
+    -- moving the player to an empty page would be worse than saying no.
+    if why == "faction" and target.faction then
+        local was = ns.faction
+        ns.faction = target.faction
+        local still = ns.Chains.HiddenReason(target)
+        if still then
+            ns.faction = was
+            why = still   -- the tab was not the real blocker; name the one that is
+        else
+            ns.char.faction = ns.faction
+            why = nil
+        end
+    end
+    if why then
+        ns.Print(ns.L[JUMP_REFUSED[why] or "Cannot jump: target is filtered out"])
+        return
+    end
     local current = ns.Source.byId and ns.Source.byId[ns.selectedEntry]
     if not current or not entryHas(current, id) then
+        -- A class page is only reachable when "show all classes" is on, but the quest may
+        -- still sit on one: prefer an entry the tree actually lists, fall back to any that
+        -- holds the quest so the jump still lands somewhere.
+        local pick, fallback
         for _, e in ipairs(ns.Source.entries or {}) do
-            if entryHas(e, id) and ns.Chains.EntryAllowed(e) then
-                ns.selectedEntry = e.id
-                ns.char.selectedEntry = e.id
-                break
+            if entryHas(e, id) then
+                if ns.Chains.EntryAllowed(e) then
+                    pick = e
+                    break
+                end
+                fallback = fallback or e
             end
         end
+        pick = pick or fallback
+        if not pick then
+            ns.Print(ns.L["Cannot jump: target is filtered out"])
+            return
+        end
+        ns.selectedEntry = pick.id
+        ns.char.selectedEntry = pick.id
     end
     ns.selectedQuest = id
     self:Refresh()
