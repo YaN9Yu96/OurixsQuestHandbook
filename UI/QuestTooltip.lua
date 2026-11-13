@@ -35,6 +35,27 @@ local COLON = ns.IsChineseClient() and "：" or ":"
 -- hex in sync with ns.Q.ColorEscape if that ever changes.
 local HEADER_R, HEADER_G, HEADER_B = 1.00, 0.82, 0.00
 
+-- Name of the item that opens a quest. The client's own item table is the first choice
+-- (it is localised in the player's language); QuestieDB's composed item name is the
+-- fallback. Both are synchronous: a tooltip must never depend on an item load callback.
+local function itemName(itemId)
+    local CItem = _G.C_Item
+    if CItem and type(CItem.GetItemNameByID) == "function" then
+        local ok, name = pcall(CItem.GetItemNameByID, itemId)
+        if ok and type(name) == "string" and name ~= "" then return name end
+    end
+    if CItem and type(CItem.GetItemInfo) == "function" then
+        local ok, name = pcall(CItem.GetItemInfo, itemId)
+        if ok and type(name) == "string" and name ~= "" then return name end
+    end
+    local ItemDB = _G.ItemDB
+    if ItemDB and type(ItemDB.name) == "function" then
+        local ok2, name2 = pcall(ItemDB.name, itemId)
+        if ok2 and type(name2) == "string" and name2 ~= "" then return name2 end
+    end
+    return "#" .. tostring(itemId)
+end
+
 -- One blank line above every header: without it the previous block's last line runs
 -- straight into the header and the two read as one stammering sentence.
 local function sectionHeader(tt, label)
@@ -127,16 +148,26 @@ function T.Show(owner, q, item, readOnly)
 
     -- Where and when the quest can be picked up. The header only appears when there is
     -- something under it: a bare "接取条件：" hanging over the data-origin line would be a
-    -- title with no block.
-    if q.minLevel or q.loc then
+    -- title with no block. For a quest opened by an item, the item (not the NPC giver)
+    -- is the real starting point, so its coordinates win over the giver's spawn.
+    local startItems = q.startItems
+    local hasStartItems = type(startItems) == "table" and #startItems > 0
+    local markLoc = q.startLoc or q.loc
+    if q.minLevel or markLoc or hasStartItems then
         sectionHeader(tt, ns.L["Accept conditions"])
         if q.minLevel then
             tt:AddLine(ns.L["Accept at Lv.%d"]:format(q.minLevel), 0.62, 0.68, 0.76)
         end
-        if q.loc then
-            local where = mapName(q.loc[1]) or tostring(q.loc[1])
+        if hasStartItems then
+            for _, itemId in ipairs(startItems) do
+                tt:AddLine(ns.L["Started by item %s"]:format(itemName(itemId)),
+                    0.62, 0.68, 0.76, true)
+            end
+        end
+        if markLoc then
+            local where = mapName(markLoc[1]) or tostring(markLoc[1])
             tt:AddLine(ns.L["Start"] .. ": " .. where ..
-                (" %.1f, %.1f"):format(q.loc[2] or 0, q.loc[3] or 0), 0.62, 0.68, 0.76, true)
+                (" %.1f, %.1f"):format(markLoc[2] or 0, markLoc[3] or 0), 0.62, 0.68, 0.76, true)
         end
     end
     -- Footer split: the "new in Forever" badge and the data-origin line are the addon's own
@@ -147,7 +178,11 @@ function T.Show(owner, q, item, readOnly)
 
     tt:AddLine(ns.L["Data origin"] .. ": " .. ns.L["QuestieDB"], 0.55, 0.62, 0.70)
     if not readOnly then
-        tt:AddLine(ns.L["Left-click: mark start on map"], 0.55, 0.62, 0.70)
+        -- Only offer the pin when there is somewhere to pin: an item-started quest with
+        -- a known drop spot qualifies, a quest with no coordinates at all does not.
+        if markLoc then
+            tt:AddLine(ns.L["Left-click: mark start on map"], 0.55, 0.62, 0.70)
+        end
         -- Only offer the jump when there is actually somewhere to jump to: a raw
         -- prerequisite id whose quest is filtered out, missing or hidden is not a place
         -- the player can be taken to, so the hint stays away.

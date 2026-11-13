@@ -434,6 +434,12 @@ function M:Toggle()
         self.frame:Show()
         self:Refresh()
         self:ResetScroll()
+        -- A build that began while the window was closed had no OnUpdate ticks (hidden
+        -- frames do not receive them). Re-arm its driver now that we are visible again,
+        -- otherwise the bottom half of the page would stay as empty reserved space.
+        if ns.ChainView and ns.ChainView.Resume and self.frame.view then
+            ns.ChainView.Resume(self.frame.view)
+        end
     end
 end
 

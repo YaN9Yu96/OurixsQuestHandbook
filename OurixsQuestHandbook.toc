@@ -5,7 +5,7 @@
 ## Notes-zhTW: 查看任務鏈關係和具體資訊，顯示目前的任務狀態。
 ## IconTexture: Interface\AddOns\OurixsQuestHandbook\Media\Icon.png
 ## Author: Ourixs
-## Version: 1.0.0
+## Version: 1.1.0
 ## DefaultState: enabled
 ## SavedVariables: OurixsQuestHandbookDB
 ## SavedVariablesPerCharacter: OurixsQuestHandbookCharDB

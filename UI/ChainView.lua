@@ -566,14 +566,17 @@ local function paintRow(view, row, item, selectedId, rightReserve)
             ns.ChainView.Update(view, view.lastRows, q.id)
             return
         end
-        if not q.loc then
+        -- Item-started quests pin the item / object that opens the quest, not the NPC
+        -- turn-in that QuestieDB also lists as a starter.
+        local loc = q.startLoc or q.loc
+        if not loc then
             ns.Print(ns.L["No start location"])
             return
         end
         -- The world map is the destination: close our own window first so the pin
         -- and waypoint are immediately visible, whatever the map call returns.
         closeMain()
-        local ok, err = ns.Map.Show(q.loc[1], q.loc[2], q.loc[3], name)
+        local ok, err = ns.Map.Show(loc[1], loc[2], loc[3], name)
         if not ok then
             ns.Print(err or ns.L["No start location"])
             return
@@ -669,7 +672,21 @@ local function finishBuild(view, totalH)
     child:SetHeight(math.max(1, totalH + 8))
     if view.scroll.UpdateThumb then view.scroll:UpdateThumb() end
     view.building = false
+    view.buildDriver = false
+    view.buildComplete = true
     view.empty:SetShown(#view.lastRows == 0)
+    -- A refresh that arrived mid-build may have carried the same quests in a settled,
+    -- different order. Only now that the page is complete is it safe to apply that order:
+    -- one bounded rebuild, never a restart loop (which would blank the bottom again).
+    -- A pending scroll target is left for that rebuilt page to resolve.
+    local nextSig, rebuilds = view.nextSig, view.rebuilds or 0
+    view.nextSig = nil
+    if nextSig and nextSig ~= view.signature and rebuilds < 1 then
+        view.rebuilds = rebuilds + 1
+        V.Update(view, view.lastRows, view.selectedId)
+        return
+    end
+    view.rebuilds = 0
     if view.pendingScroll then
         local id = view.pendingScroll
         view.pendingScroll = nil
@@ -703,6 +720,20 @@ local function stepBuild(view)
     end
 end
 
+-- Identity of a page that does not depend on row order. questSorter re-orders the very
+-- same quests while their client-side titles / levels are still landing, so a refresh
+-- arriving during an incremental build can carry a different planSignature for the SAME
+-- page. Comparing quest ids (as a set) keeps that refresh from looking like a page switch.
+local function pageKey(rows)
+    local ids = {}
+    for i = 1, #rows do
+        local q = rows[i] and rows[i].q
+        ids[i] = tostring((q and q.id) or 0)
+    end
+    table.sort(ids)
+    return #ids .. ":" .. table.concat(ids, ",")
+end
+
 -- A page is "the same" when every row position holds the same quest and the fold state
 -- of each card is unchanged. Only the text can then differ, so the existing frames are
 -- repainted instead of rebuilt: that is the selection-click path.
@@ -728,13 +759,37 @@ function V:Update(rows, selectedId)
 
     local plan, totalH = buildPlan(self, self.lastRows, selectedId)
     local sig = planSignature(plan)
+    local key, prevKey = pageKey(self.lastRows), self.pageKey
+    local nRows = 0
+    for _, e in ipairs(plan) do if e.kind == "row" then nRows = nRows + 1 end end
 
-    if not self.building and self.rowPlan and sig == self.signature then
+    -- A refresh can arrive while a tall page is still being built a few rows per frame:
+    -- reward icons resolving, quest titles landing, log events. Restarting there re-hides
+    -- every row and rewinds planIndex to 1, so a steady trickle of refreshes keeps the
+    -- bottom of the page blank while the scroll child already reserves its full height.
+    -- Identity is the quest SET, not the order: questSorter re-orders the same quests as
+    -- their data settles, which changes the signature but not the page. Keep the in-flight
+    -- build running and repaint only the rows that exist so far.
+    if self.building and self.plan and key == self.pageKey then
+        self.nextSig = (sig ~= self.signature) and sig or nil
+        for i = 1, self.rowCount do
+            local e = self.rowPlan and self.rowPlan[i]
+            if e and self.rows[i] and self.rows[i]:IsShown() then
+                paintRow(self, self.rows[i], e.item, selectedId, e.rightReserve)
+            end
+        end
+        return
+    end
+
+    -- "Same page, just repaint" is only valid after a COMPLETE build. An interrupted
+    -- build left rowCount short of the plan; taking this shortcut would repaint those few
+    -- rows forever and leave everything below them blank.
+    if not self.building and self.buildComplete and self.rowPlan and
+       sig == self.signature and self.rowCount == self.expectedRows then
         for i = 1, self.rowCount do
             local e = self.rowPlan[i]
-            -- The frame pool can be shorter than the plan after V:Trim; the signature is
-            -- dropped there too, so this is a belt-and-braces guard on the shortcut.
             if e and self.rows[i] then
+                self.rows[i]:Show()
                 paintRow(self, self.rows[i], e.item, selectedId, e.rightReserve)
             end
         end
@@ -742,10 +797,15 @@ function V:Update(rows, selectedId)
     end
 
     self:SetScript("OnUpdate", nil)
+    self.buildDriver = false
     for _, row in ipairs(self.rows) do row:Hide() end
     for _, card in ipairs(self.cards) do card:Hide() end
 
     self.plan, self.planHeight, self.signature = plan, totalH, sig
+    self.pageKey, self.expectedRows = key, nRows
+    self.nextSig = nil
+    if key ~= prevKey then self.rebuilds = 0 end
+    self.buildComplete = false
     self.planIndex, self.rowCount, self.cardCount = 1, 0, 0
     self.ids, self.rowPlan = {}, {}
     child:SetHeight(math.max(1, totalH + 8))
@@ -764,9 +824,22 @@ function V:Update(rows, selectedId)
     end
 
     self.building = true
+    self.buildDriver = true
     self.batchRows = FIRST_BATCH_ROWS
     self:SetScript("OnUpdate", stepBuild)
     stepBuild(self)
+end
+
+-- OnUpdate only fires while its frame is visible. A build started while the window was
+-- closed (settings changed, or a click handed the player over to the world map) pauses
+-- with its driver still attached. Re-arm it whenever the window comes back, so the page
+-- always finishes instead of staying half-drawn with the rest reserved as empty space.
+function V:Resume()
+    if not self.building or not self.plan then return end
+    if self.planIndex and self.planIndex <= #self.plan then
+        self.buildDriver = true
+        self:SetScript("OnUpdate", stepBuild)
+    end
 end
 
 -- Repaint the rows of one quest in place, without touching the rest of the page. Used
@@ -811,13 +884,16 @@ end
 
 function V:Trim()
     if self.building then return end
-    local before = #self.rows
+    local before, beforeCards = #self.rows, #self.cards
     dropFrames(self.rows, TRIM_KEEP_ROWS)
     dropFrames(self.cards, TRIM_KEEP_CARDS)
     -- The cached plan describes a frame pool that no longer exists, so the "same page,
     -- just repaint" shortcut must not be taken for the next open: the page is rebuilt
     -- (a few rows per frame) against the shortened pool instead.
-    if #self.rows ~= before then self.signature = nil end
+    if #self.rows ~= before or #self.cards ~= beforeCards then
+        self.signature = nil
+        self.buildComplete = false
+    end
     if self.scroll and self.scroll.UpdateThumb then self.scroll:UpdateThumb() end
 end
 

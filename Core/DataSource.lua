@@ -194,7 +194,7 @@ end
 
 -- startedBy / finishedBy are positional tables: { npcIds, objectIds, itemIds }.
 -- They can be sparse (an item-only quest has just slot 3, slot 1 is nil).
--- Returns starter NPCs, starter objects and finisher NPCs in one pass.
+-- Returns starter NPCs, starter objects, finisher NPCs and starter items in one pass.
 -- Every slot is type-checked before ipairs: if a future QuestieDB flattens the positional
 -- table into a plain id list (or returns a bare number), ipairs() on a number would raise
 -- and take the whole index build down with it.
@@ -212,21 +212,24 @@ end
 
 local function questGivers(id)
     local QuestDB = _G.QuestDB
-    local npcs, objects, fnpcs = {}, {}, {}
-    local function collect(t, a, b)
+    local npcs, objects, fnpcs, items = {}, {}, {}, {}
+    local function collect(t, a, b, c)
         if type(t) ~= "table" then return end
         for _, n in ipairs(idList(t[1])) do a[#a + 1] = n end
         if b then
             for _, o in ipairs(idList(t[2])) do b[#b + 1] = o end
         end
+        if c then
+            for _, i in ipairs(idList(t[3])) do c[#c + 1] = i end
+        end
     end
     if QuestDB then
         local ok, s = pcall(QuestDB.startedBy, id)
-        if ok then collect(s, npcs, objects) end
+        if ok then collect(s, npcs, objects, items) end
         local ok2, f = pcall(QuestDB.finishedBy, id)
         if ok2 then collect(f, fnpcs, {}) end
     end
-    return npcs, objects, fnpcs
+    return npcs, objects, fnpcs, items
 end
 
 -- Derive the quest's faction from the starter / finisher NPCs' standing.
@@ -296,15 +299,24 @@ local function locOfGivers(npcs, objects)
     return nil
 end
 
--- Forever's "Friend of the Library" series: 41 book-collection quests plus the hand-in
--- steps, all run by Owen Thadd in Undercity.
---
--- The DBC files them under QuestSort 284 ("Special"), but the data we actually read is
--- post-correction: QuestieDB's Forever correction layer rewrites their zoneOrSort to
--- Undercity AND gives them a starter NPC + a book object. Both of the markers this used
--- to rely on (sort 284, "nobody hands it out") are gone at load time, so the giver NPC
--- is what decides now.
-local LIBRARY_NPC = 211022
+-- Inverted ItemDB indexes, built once before the quest index (buildItemIndex):
+--   rewardsIndex     questId  -> { reward itemId, ... }
+--   startItemsIndex  questId  -> { itemId whose ItemDB.startQuest == questId, ... }
+--   objectItemsIndex objectId -> { itemId dropped by that object, ... }
+-- QuestieDB's Quest entity has neither a reward-item field nor a general "started by
+-- item" field, so both have to be reconstructed from its Item entity.
+local rewardsIndex, startItemsIndex, objectItemsIndex = {}, {}, {}
+
+-- Forever's "Friend of the Library" series: the book-collection quests plus the hand-in
+-- steps. The DBC files them under QuestSort 284 ("Special"), but the data we read is
+-- post-correction: QuestieDB's Forever layer rewrites zoneOrSort to the faction city and
+-- swaps the librarian NPC (Horde 211022 / Alliance 211033). The eight later books
+-- (84395..84402) instead use the faction mage trainers (7825 / 5497) as their hand-in
+-- NPC, so the librarian id alone misses them. What every single book quest has in common
+-- is the reward "Comprehension Charm" (理解魔符, item 211779), recorded by
+-- ItemDB.questRewards: it is the only marker that survives all three correction shapes.
+local LIBRARY_NPCS = { [211022] = true, [211033] = true }
+local LIBRARY_REWARD_ITEM = 211779
 local LIBRARY_KEY = "special:library"
 
 local function containsId(list, target)
@@ -312,6 +324,83 @@ local function containsId(list, target)
         if v == target then return true end
     end
     return false
+end
+
+local function isLibrary(id, npcs, fnpcs)
+    for _, n in ipairs(npcs) do if LIBRARY_NPCS[n] then return true end end
+    for _, n in ipairs(fnpcs) do if LIBRARY_NPCS[n] then return true end end
+    for _, itemId in ipairs(rewardsIndex[id] or {}) do
+        if itemId == LIBRARY_REWARD_ITEM then return true end
+    end
+    return false
+end
+
+-- Items that open a quest. QuestieDB records three different shapes:
+--   1. ItemDB.startQuest(itemId) == questId (the common one, ~390 quests);
+--   2. startedBy[3] lists item ids explicitly (a handful);
+--   3. an object in startedBy[2] starts the quest and drops the item the player picks
+--      up -- the library books. ItemDB.startQuest is empty for those, but
+--      ObjectDB.questStarts links the object back to exactly one quest.
+local function startItemList(id, slotItems, objects)
+    local out, seen = {}, {}
+    local function add(itemId)
+        if type(itemId) == "number" and itemId > 0 and not seen[itemId] then
+            seen[itemId] = true
+            out[#out + 1] = itemId
+        end
+    end
+    for _, itemId in ipairs(startItemsIndex[id] or {}) do add(itemId) end
+    for _, itemId in ipairs(slotItems or {}) do add(itemId) end
+    -- Shape 3 is an inference, so only use it when shapes 1/2 found nothing. Some world
+    -- objects drop a dozen unrelated items; those must never become "quest openers".
+    local ObjectDB = _G.ObjectDB
+    if #out == 0 and ObjectDB and type(ObjectDB.questStarts) == "function" then
+        for _, obj in ipairs(objects or {}) do
+            local ok, qs = pcall(ObjectDB.questStarts, obj)
+            if ok and containsId(qs, id) then
+                for _, itemId in ipairs(objectItemsIndex[obj] or {}) do add(itemId) end
+            end
+        end
+    end
+    return out
+end
+
+-- Where a triggering item can actually be found: the starter object's own spawn first
+-- (that is the book lying on the ground), then the object / NPC that drops the item.
+-- Only used for item-started quests, so a normal NPC-given quest keeps its old pin.
+local function locOfStart(startItems, objects)
+    local ItemDB, ObjectDB, NpcDB = _G.ItemDB, _G.ObjectDB, _G.NpcDB
+    local function firstSpawn(getSpawns, entity)
+        if not getSpawns then return nil end
+        local ok, spawns = pcall(getSpawns, entity)
+        if ok then return pickSpawn(spawns) end
+        return nil
+    end
+    if ObjectDB and ObjectDB.spawns then
+        for _, obj in ipairs(objects or {}) do
+            local loc = firstSpawn(ObjectDB.spawns, obj)
+            if loc then return loc end
+        end
+    end
+    if ItemDB and type(ItemDB.Get) == "function" then
+        for _, itemId in ipairs(startItems) do
+            local okO, objs = pcall(ItemDB.Get, itemId, "objectDrops")
+            if okO and type(objs) == "table" and ObjectDB and ObjectDB.spawns then
+                for _, obj in ipairs(objs) do
+                    local loc = firstSpawn(ObjectDB.spawns, obj)
+                    if loc then return loc end
+                end
+            end
+            local okN, npcs = pcall(ItemDB.Get, itemId, "npcDrops")
+            if okN and type(npcs) == "table" and NpcDB and NpcDB.spawns then
+                for _, npc in ipairs(npcs) do
+                    local loc = firstSpawn(NpcDB.spawns, npc)
+                    if loc then return loc end
+                end
+            end
+        end
+    end
+    return nil
 end
 
 -- Build the raw prerequisite set for every quest, then invert the forward
@@ -411,7 +500,9 @@ local function buildBase()
         end
 
         -- One giver read per quest feeds faction, start pin and the NPC panel.
-        local npcs, objects, fnpcs = questGivers(id)
+        local npcs, objects, fnpcs, slotItems = questGivers(id)
+        local startItems = startItemList(id, slotItems, objects)
+        local startLoc = (#startItems > 0) and locOfStart(startItems, objects) or nil
         -- The race mask is the authoritative faction source. `false` means both
         -- factions may take the quest, so the page must appear in both tabs.
         -- (Written as two statements: `a and false or nil` would collapse to nil and
@@ -431,11 +522,15 @@ local function buildBase()
             minLevel = minLevel,
             faction = faction,
             loc = locOfGivers(npcs, objects),
+            -- Item-started quests: the item that opens the quest, and where that item
+            -- (or its object) sits. Used by the tooltip and the left-click map pin.
+            startItems = (#startItems > 0) and startItems or nil,
+            startLoc = startLoc,
             npcID = npcs[1],
-            -- Somebody (NPC or object) actually hands this quest out.
-            hasGiver = (#npcs + #objects) > 0,
-            -- Handed out by the Undercity librarian: the book-collection series.
-            library = containsId(npcs, LIBRARY_NPC) or containsId(fnpcs, LIBRARY_NPC),
+            -- Somebody (NPC or object) actually hands this quest out, or an item triggers it.
+            hasGiver = (#npcs + #objects + #startItems) > 0,
+            -- Handed out by a faction librarian, or rewarding the library's charm.
+            library = isLibrary(id, npcs, fnpcs),
             classKey = classKey,
             classList = classList,
             profKey = nil,
@@ -594,14 +689,7 @@ end
 
 local baseQuests, baseEntries = nil, nil
 local built = false
-
--- Inverted reward index: questId -> { itemId, ... }. QuestieDB's Quest entity carries
--- no reward-item field, but its Item entity records which quests reward each item
--- (ItemDB.questRewards). We reverse that so a quest can list its reward items. The
--- split between "choose one of N" and "guaranteed" is NOT in this data, so the UI can
--- only separate the two when the live client answers for a quest in the player's log.
-local rewardsIndex = {}
-local rewardsBuilt = false
+local itemIndexBuilt = false
 
 -- QuestieDB is the single source of truth. No local corrections, no share strings, no
 -- SavedVariables overlay. The index is built once per session (warmed up a few seconds
@@ -614,31 +702,53 @@ local rewardsBuilt = false
 -- `force` re-reads QuestieDB instead of reusing the baseline built earlier. Nothing in the
 -- addon needs it at runtime (the baseline never changes under a live session); it exists
 -- so a rebuild after a data-layer change can be verified.
--- Reverse ItemDB.questRewards ("which quests reward this item") into a per-quest list of
--- reward item ids. Iterates every item once; cheap relative to buildBase and runs at the
--- same warm-up. Each list is naturally free of duplicate item ids (one item contributes
--- itself to a quest at most once).
-local function buildRewards()
-    rewardsIndex = {}
+-- One pass over ItemDB builds three inverted indexes:
+--   * questRewards -> rewardsIndex (quest -> reward items; the split between "choose one
+--     of N" and "guaranteed" is NOT in this data),
+--   * startQuest   -> startItemsIndex (quest -> item that opens it),
+--   * objectDrops  -> objectItemsIndex (object -> items it drops).
+-- ItemDB exposes Get(id, key) / GetByIndex(id, fieldIndex) plus named getters; Get is a
+-- plain function with the entity captured in a closure, so it must be called as
+-- ItemDB.Get(itemId, key) -- passing ItemDB as the first arg would shift the arguments.
+local function buildItemIndex()
+    rewardsIndex, startItemsIndex, objectItemsIndex = {}, {}, {}
     local ItemDB = _G.ItemDB
-    if not ItemDB or type(ItemDB.GetAllIds) ~= "function" then return end
+    if not ItemDB or type(ItemDB.GetAllIds) ~= "function"
+        or type(ItemDB.Get) ~= "function" then return end
     local ids = ItemDB.GetAllIds()
     if not ids then return end
-    -- ItemDB exposes only Get(id, key) / GetByIndex(id, fieldIndex); there is no per-field
-    -- accessor named after the field, so read questRewards through Get (field 6 by name).
     for _, itemId in ipairs(ids) do
         if type(itemId) == "number" and itemId > 0 then
-            -- Get(id, key) is a plain function (no self): the entity table is captured in a
-            -- closure, so passing ItemDB as the first arg would shift arguments and read the
-            -- wrong field. Call it as ItemDB.Get(itemId, "questRewards").
-            local ok, qids = pcall(ItemDB.Get, itemId, "questRewards")
-            if ok and type(qids) == "table" then
+            local okR, qids = pcall(ItemDB.Get, itemId, "questRewards")
+            if okR and type(qids) == "table" then
                 for _, qid in ipairs(qids) do
                     if type(qid) == "number" and qid > 0 then
                         local list = rewardsIndex[qid]
                         if not list then
                             list = {}
                             rewardsIndex[qid] = list
+                        end
+                        list[#list + 1] = itemId
+                    end
+                end
+            end
+            local okS, qid = pcall(ItemDB.Get, itemId, "startQuest")
+            if okS and type(qid) == "number" and qid > 0 then
+                local list = startItemsIndex[qid]
+                if not list then
+                    list = {}
+                    startItemsIndex[qid] = list
+                end
+                list[#list + 1] = itemId
+            end
+            local okO, objs = pcall(ItemDB.Get, itemId, "objectDrops")
+            if okO and type(objs) == "table" then
+                for _, obj in ipairs(objs) do
+                    if type(obj) == "number" and obj > 0 then
+                        local list = objectItemsIndex[obj]
+                        if not list then
+                            list = {}
+                            objectItemsIndex[obj] = list
                         end
                         list[#list + 1] = itemId
                     end
@@ -651,15 +761,16 @@ end
 function S.Build(force)
     if force then
         baseQuests, baseEntries = nil, nil
-        rewardsIndex = {}
-        rewardsBuilt = false
+        itemIndexBuilt = false
+    end
+    -- The inverted item indexes must exist before buildBase: the library page is decided
+    -- by the books' shared reward item, and startItemList reads the other two.
+    if not itemIndexBuilt then
+        buildItemIndex()
+        itemIndexBuilt = true
     end
     if not baseQuests then
         baseQuests, baseEntries = buildBase()
-    end
-    if not rewardsBuilt then
-        buildRewards()
-        rewardsBuilt = true
     end
     S.quests, S.entries = baseQuests, baseEntries
     S.byId = {}
