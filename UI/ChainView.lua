@@ -14,18 +14,17 @@ local ROW_H, PAD, GAP = 30, 9, 12
 local TRUNK_X, INDENT = 21, 18
 local NODE_X = TRUNK_X + INDENT
 local CENTER = ROW_H / 2
--- A row costs about a dozen frames, and a chain page can be sixty of them, so a large page
--- is created over several frames -- a few rows per frame -- and the player can watch it fill
--- in. Nothing is pre-built behind the player's back: a row frame only exists once a page has
--- actually shown it, so the addon's frame memory tracks what the player really looks at
--- rather than a guessed worst case. Small pages are built in one go because spreading them
--- would only cost frames for nothing; the first slice of a big page is larger so the top of
--- the page lands immediately.
-local BATCH_ROWS = 3
-local BATCH_MS = 4
-local FIRST_BATCH_ROWS = 14
--- Pages this small are cheaper to build in one go than to spread over frames.
-local SYNC_LIMIT = 12
+-- A row costs about a dozen frames, and a chain page can be sixty of them. A tall page is
+-- created a few rows at a time on a C_Timer ticker, so the player watches it fill in from
+-- top to bottom -- a deliberate "loading" animation. Nothing is pre-built and nothing is
+-- reused: every open / tab switch throws the old row frames away and builds a fresh set, so
+-- the row pool can never drift into a corrupt in-flight state. The ticker fires regardless of
+-- frame visibility, so a build never parks (the root cause of the old blank-bottom bug, where
+-- OnUpdate ticks silently stopped arriving). The first slice is larger so the page top lands
+-- at once; rows after that dribble in at BATCH_INTERVAL.
+local FIRST_BATCH_ROWS = 12   -- rows in the first slice (page top lands immediately)
+local BATCH_ROWS = 3          -- rows per subsequent ticker slice
+local BATCH_INTERVAL = 0.03   -- seconds between slices: the visible fill pace
 -- One capsule frame per "not yours" kind, so each keeps its own colour while the text
 -- inside is whatever the quest data actually requires. The capsules are created the first
 -- time a row needs one instead of for every row up front: most rows never show a badge,
@@ -667,26 +666,19 @@ end
 
 local function finishBuild(view, totalH)
     local child = view.scroll.child
-    for i = view.rowCount + 1, #view.rows do view.rows[i]:Hide() end
-    for i = view.cardCount + 1, #view.cards do view.cards[i]:Hide() end
+    for i = (view.rowCount or 0) + 1, #view.rows do
+        if view.rows[i] then view.rows[i]:Hide() end
+    end
+    for i = (view.cardCount or 0) + 1, #view.cards do
+        if view.cards[i] then view.cards[i]:Hide() end
+    end
     child:SetHeight(math.max(1, totalH + 8))
     if view.scroll.UpdateThumb then view.scroll:UpdateThumb() end
     view.building = false
-    view.buildDriver = false
-    view.buildComplete = true
+    view.complete = true
+    -- Invalidate any pending ticker so a batch scheduled before completion cannot run again.
+    view.buildToken = (view.buildToken or 0) + 1
     view.empty:SetShown(#view.lastRows == 0)
-    -- A refresh that arrived mid-build may have carried the same quests in a settled,
-    -- different order. Only now that the page is complete is it safe to apply that order:
-    -- one bounded rebuild, never a restart loop (which would blank the bottom again).
-    -- A pending scroll target is left for that rebuilt page to resolve.
-    local nextSig, rebuilds = view.nextSig, view.rebuilds or 0
-    view.nextSig = nil
-    if nextSig and nextSig ~= view.signature and rebuilds < 1 then
-        view.rebuilds = rebuilds + 1
-        V.Update(view, view.lastRows, view.selectedId)
-        return
-    end
-    view.rebuilds = 0
     if view.pendingScroll then
         local id = view.pendingScroll
         view.pendingScroll = nil
@@ -694,30 +686,78 @@ local function finishBuild(view, totalH)
     end
 end
 
-local function stepBuild(view)
-    -- The first slice is bigger so one screenful lands in a single frame; after that the
-    -- budget is small enough that nothing is felt.
-    local limit = view.batchRows or BATCH_ROWS
-    view.batchRows = BATCH_ROWS
-    local deadline
-    if type(debugprofilestop) == "function" then
-        deadline = debugprofilestop() + BATCH_MS
+-- Throw away every row/card frame and reset the pool, so nothing is reused between builds.
+-- Dropping the references lets the Lua GC reclaim them; with no Lua handle and no script
+-- handlers left, the client-side frame object is collected too.
+local function clearRows(view)
+    for i = 1, #view.rows do
+        local row = view.rows[i]
+        if row then
+            row:Hide()
+            if row.SetScript then
+                pcall(row.SetScript, row, "OnEnter", nil)
+                pcall(row.SetScript, row, "OnLeave", nil)
+                pcall(row.SetScript, row, "OnClick", nil)
+            end
+        end
     end
-    local done = 0
-    local plan = view.plan
-    while view.planIndex <= #plan do
-        local e = plan[view.planIndex]
-        view.planIndex = view.planIndex + 1
-        if e.kind == "card" then view.cardCount = (view.cardCount or 0) + 1 end
-        buildOne(view, e, view.selectedId)
-        done = done + 1
-        if done >= limit then break end
-        if deadline and debugprofilestop() > deadline then break end
+    for i = 1, #view.cards do
+        local c = view.cards[i]
+        if c then
+            c:Hide()
+            if c.fold then c.fold:Hide() end
+        end
     end
-    if view.planIndex > #plan then
-        view:SetScript("OnUpdate", nil)
-        finishBuild(view, view.planHeight)
+    view.rows, view.cards = {}, {}
+    view.rowCount, view.cardCount = 0, 0
+end
+
+-- Full build of a page on a C_Timer ticker. The ticker fires regardless of frame visibility,
+-- so the page always completes even if OnUpdate ticks stop arriving -- that is the whole
+-- point after the blank-bottom bug. A build token cancels any ticker from a superseded build.
+local function StartBuild(view, rows, selectedId, plan, totalH, key)
+    view.building = false
+    view.complete = false
+    view.buildToken = (view.buildToken or 0) + 1   -- cancel any prior ticker
+    view.plan, view.planHeight = plan, totalH
+    view.pageKey = key
+    local child = view.scroll.child
+    child:SetHeight(math.max(1, totalH + 8))
+    if view.scroll.UpdateThumb then view.scroll:UpdateThumb() end
+    clearRows(view)
+    view.planIndex, view.rowCount, view.cardCount = 1, 0, 0
+    view.ids, view.rowPlan = {}, {}
+    view.empty:SetShown(#rows == 0)
+    if #rows == 0 then
+        view.building = false
+        view.complete = true
+        return
     end
+    view.building = true
+    view.batchRows = FIRST_BATCH_ROWS
+    local myToken = view.buildToken
+    local function batch()
+        if view.buildToken ~= myToken then return end   -- a newer build superseded this one
+        if not view.building then return end
+        local limit = view.batchRows or FIRST_BATCH_ROWS
+        view.batchRows = BATCH_ROWS
+        local planT = view.plan
+        local done = 0
+        while view.planIndex <= #planT do
+            local e = planT[view.planIndex]
+            view.planIndex = view.planIndex + 1
+            if e.kind == "card" then view.cardCount = (view.cardCount or 0) + 1 end
+            buildOne(view, e, selectedId)
+            done = done + 1
+            if done >= limit then break end
+        end
+        if view.planIndex > #planT then
+            finishBuild(view, view.planHeight)
+        else
+            C_Timer.After(BATCH_INTERVAL, batch)
+        end
+    end
+    C_Timer.After(0, batch)
 end
 
 -- Identity of a page that does not depend on row order. questSorter re-orders the very
@@ -734,58 +774,24 @@ local function pageKey(rows)
     return #ids .. ":" .. table.concat(ids, ",")
 end
 
--- A page is "the same" when every row position holds the same quest and the fold state
--- of each card is unchanged. Only the text can then differ, so the existing frames are
--- repainted instead of rebuilt: that is the selection-click path.
-local function planSignature(plan)
-    local parts = {}
-    for i = 1, #plan do
-        local e = plan[i]
-        if e.kind == "card" then
-            parts[i] = e.foldShown and "c1" or "c0"
-        else
-            parts[i] = "r" .. tostring(e.item.q and e.item.q.id or 0)
-        end
-    end
-    return table.concat(parts, "|")
-end
-
 function V:Update(rows, selectedId)
-    local child = self.scroll.child
     self.lastRows = rows or {}
     self.selectedId = selectedId
-    self.generation = (self.generation or 0) + 1
     self.empty:SetShown(#self.lastRows == 0)
-
     local plan, totalH = buildPlan(self, self.lastRows, selectedId)
-    local sig = planSignature(plan)
-    local key, prevKey = pageKey(self.lastRows), self.pageKey
-    local nRows = 0
-    for _, e in ipairs(plan) do if e.kind == "row" then nRows = nRows + 1 end end
+    local key = pageKey(self.lastRows)
 
-    -- A refresh can arrive while a tall page is still being built a few rows per frame:
-    -- reward icons resolving, quest titles landing, log events. Restarting there re-hides
-    -- every row and rewinds planIndex to 1, so a steady trickle of refreshes keeps the
-    -- bottom of the page blank while the scroll child already reserves its full height.
-    -- Identity is the quest SET, not the order: questSorter re-orders the same quests as
-    -- their data settles, which changes the signature but not the page. Keep the in-flight
-    -- build running and repaint only the rows that exist so far.
-    if self.building and self.plan and key == self.pageKey then
-        self.nextSig = (sig ~= self.signature) and sig or nil
-        for i = 1, self.rowCount do
-            local e = self.rowPlan and self.rowPlan[i]
-            if e and self.rows[i] and self.rows[i]:IsShown() then
-                paintRow(self, self.rows[i], e.item, selectedId, e.rightReserve)
-            end
-        end
+    -- A refresh arriving while a build of THIS page is already in flight (reward icons
+    -- resolving, titles landing, log events) must never restart it: restarting re-hides
+    -- every row and rewinds, which is exactly the old blank-bottom bug. Keep building.
+    if self.building and key == self.pageKey then
         return
     end
 
-    -- "Same page, just repaint" is only valid after a COMPLETE build. An interrupted
-    -- build left rowCount short of the plan; taking this shortcut would repaint those few
-    -- rows forever and leave everything below them blank.
-    if not self.building and self.buildComplete and self.rowPlan and
-       sig == self.signature and self.rowCount == self.expectedRows then
+    -- A settled page, refreshed with the same quests (in-session: a faction/zone switch
+    -- that lands on the same page, a selection click, a late data update): repaint the
+    -- existing rows in place -- fast, no reload, no animation.
+    if not self.building and self.complete and key == self.pageKey and self.rowPlan then
         for i = 1, self.rowCount do
             local e = self.rowPlan[i]
             if e and self.rows[i] then
@@ -796,51 +802,18 @@ function V:Update(rows, selectedId)
         return
     end
 
-    self:SetScript("OnUpdate", nil)
-    self.buildDriver = false
-    for _, row in ipairs(self.rows) do row:Hide() end
-    for _, card in ipairs(self.cards) do card:Hide() end
-
-    self.plan, self.planHeight, self.signature = plan, totalH, sig
-    self.pageKey, self.expectedRows = key, nRows
-    self.nextSig = nil
-    if key ~= prevKey then self.rebuilds = 0 end
-    self.buildComplete = false
-    self.planIndex, self.rowCount, self.cardCount = 1, 0, 0
-    self.ids, self.rowPlan = {}, {}
-    child:SetHeight(math.max(1, totalH + 8))
-
-    -- Small pages are cheaper to build in one go than to spread over frames.
-    if #plan <= SYNC_LIMIT then
-        while self.planIndex <= #plan do
-            local e = plan[self.planIndex]
-            self.planIndex = self.planIndex + 1
-            if e.kind == "card" then self.cardCount = self.cardCount + 1 end
-            buildOne(self, e, selectedId)
-        end
-        self.building = false
-        finishBuild(self, totalH)
-        return
-    end
-
-    self.building = true
-    self.buildDriver = true
-    self.batchRows = FIRST_BATCH_ROWS
-    self:SetScript("OnUpdate", stepBuild)
-    stepBuild(self)
+    -- Anything else -- open, tab switch, page change, or first build -- throws the old
+    -- frames away and builds a fresh set on the C_Timer ticker. Only do this while the
+    -- window is actually on screen: a refresh that fires while hidden (map hand-off, settings
+    -- open) would otherwise build -- and leak -- frames that OnHide already released. The
+    -- next open rebuilds from scratch anyway.
+    local mainShown = ns.Main and ns.Main.frame and ns.Main.frame:IsShown()
+    if not mainShown then return end
+    StartBuild(self, self.lastRows, selectedId, plan, totalH, key)
 end
 
--- OnUpdate only fires while its frame is visible. A build started while the window was
--- closed (settings changed, or a click handed the player over to the world map) pauses
--- with its driver still attached. Re-arm it whenever the window comes back, so the page
--- always finishes instead of staying half-drawn with the rest reserved as empty space.
-function V:Resume()
-    if not self.building or not self.plan then return end
-    if self.planIndex and self.planIndex <= #self.plan then
-        self.buildDriver = true
-        self:SetScript("OnUpdate", stepBuild)
-    end
-end
+-- The window-open rebuild is handled by V:Update + V:OnHide: OnHide clears the page and
+-- marks it incomplete, so the next V:Update on open starts a fresh C_Timer build.
 
 -- Repaint the rows of one quest in place, without touching the rest of the page. Used
 -- when a quest's title arrives from the client mid-session.
@@ -856,56 +829,16 @@ function V:Patch(id, selectedId)
     end
 end
 
--- Release row/card frames the player is no longer looking at. A frame pool only ever grows
--- in this design (a visited page leaves its rows behind), so a long session that browses a
--- hundred-row page would otherwise keep all of those frames alive forever. When the window
--- has been hidden for a while and nothing is mid-build, drop the surplus down to a small
--- floor: reopening will rebuild the rows a few per frame, which the player has chosen to
--- accept over keeping the memory. Anonymous frames whose last reference is dropped here are
--- collected by the Lua GC afterwards.
-local TRIM_KEEP_ROWS, TRIM_KEEP_CARDS = 40, 6
-local trimTimer
-
-local function dropFrames(list, keep)
-    if #list <= keep then return end
-    for i = #list, keep + 1, -1 do
-        local fr = list[i]
-        list[i] = nil
-        if fr then
-            fr:Hide()
-            if fr.ClearAllPoints then pcall(fr.ClearAllPoints, fr) end
-            fr:SetScript("OnUpdate", nil)
-            fr:SetScript("OnEnter", nil)
-            fr:SetScript("OnLeave", nil)
-            fr:SetScript("OnClick", nil)
-        end
-    end
-end
-
-function V:Trim()
-    if self.building then return end
-    local before, beforeCards = #self.rows, #self.cards
-    dropFrames(self.rows, TRIM_KEEP_ROWS)
-    dropFrames(self.cards, TRIM_KEEP_CARDS)
-    -- The cached plan describes a frame pool that no longer exists, so the "same page,
-    -- just repaint" shortcut must not be taken for the next open: the page is rebuilt
-    -- (a few rows per frame) against the shortened pool instead.
-    if #self.rows ~= before or #self.cards ~= beforeCards then
-        self.signature = nil
-        self.buildComplete = false
-    end
-    if self.scroll and self.scroll.UpdateThumb then self.scroll:UpdateThumb() end
-end
-
--- Called by the main window once it has been hidden for a while.
-function V:ScheduleTrim(seconds)
-    if trimTimer then return end
-    if not (C_Timer and C_Timer.After) then return end
-    trimTimer = C_Timer.After(seconds, function()
-        trimTimer = nil
-        local f = ns.Main and ns.Main.frame
-        if f and not f:IsShown() and not self.building then V.Trim(self) end
-    end)
+-- The window closed: cancel any in-flight ticker and release every row/card frame, so the
+-- memory the page held comes back. Reopening rebuilds from scratch, so nothing is reused --
+-- which is exactly the behaviour the player asked for. Dropping the references lets the Lua
+-- GC reclaim the frame objects; with no Lua handle and no script handlers left, the
+-- client-side objects are collected too.
+function V:OnHide()
+    self.buildToken = (self.buildToken or 0) + 1   -- stop any pending C_Timer batch
+    self.building = false
+    self.complete = false
+    clearRows(self)
 end
 
 function V.ScrollToQuest(f, id)

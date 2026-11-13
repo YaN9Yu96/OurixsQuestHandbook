@@ -41,8 +41,10 @@ function M.Create()
     end)
     f:SetScript("OnHide", function()
         ns.Tooltip.Hide()
-        if ns.ChainView and ns.ChainView.ScheduleTrim and f.view then
-            ns.ChainView.ScheduleTrim(f.view, 60)
+        -- Release the row/card frames immediately so closing the window frees the memory
+        -- the page held. The next open rebuilds from scratch (C_Timer driven).
+        if ns.ChainView and ns.ChainView.OnHide and f.view then
+            ns.ChainView.OnHide(f.view)
         end
     end)
     f:SetMovable(true)
@@ -434,12 +436,6 @@ function M:Toggle()
         self.frame:Show()
         self:Refresh()
         self:ResetScroll()
-        -- A build that began while the window was closed had no OnUpdate ticks (hidden
-        -- frames do not receive them). Re-arm its driver now that we are visible again,
-        -- otherwise the bottom half of the page would stay as empty reserved space.
-        if ns.ChainView and ns.ChainView.Resume and self.frame.view then
-            ns.ChainView.Resume(self.frame.view)
-        end
     end
 end
 
