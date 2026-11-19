@@ -182,7 +182,9 @@ function T.Show(owner, q, item, readOnly)
     end
     if not native then
         local level = ns.Q.Level(q.id, q.level)
-        local prefix = level and (ns.Q.ColorEscape(level) .. "[" .. level .. "]|r ") or ""
+        -- Native "D" suffix for dungeon quests (tagID 81 via the client API).
+        local dungeonTag = (level and ns.Q.IsDungeon(q.id)) and "D" or ""
+        local prefix = level and (ns.Q.ColorEscape(level) .. "[" .. level .. dungeonTag .. "]|r ") or ""
         tt:AddLine(prefix .. ns.Q.Title(q.id, nil), 1, 0.82, 0, true)
     end
 

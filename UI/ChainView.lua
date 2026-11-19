@@ -600,7 +600,10 @@ local function paintRow(view, row, item, selectedId, rightReserve)
     end
 
     local level = ns.Q.Level(q.id, q.level)
-    local head = level and (ns.Q.ColorEscape(level) .. "[" .. level .. "]|r ") or ""
+    -- Dungeon quests get the native "D" suffix (e.g. [17D]), read from the client's
+    -- quest tag so it stays correct as the database grows -- no local id lists.
+    local dungeonTag = (level and ns.Q.IsDungeon(q.id)) and "D" or ""
+    local head = level and (ns.Q.ColorEscape(level) .. "[" .. level .. dungeonTag .. "]|r ") or ""
     local name = ns.Q.FastTitle(q.id, q.titleFallback)
     -- Badge follows the title on the SAME line; no second reason line,
     -- no "you are Lv.x", no multi-prerequisite text in the list.

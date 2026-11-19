@@ -334,6 +334,40 @@ function Q.Level(id, fallback)
     return fallback
 end
 
+-- Dungeon quests carry the native quest tag "Dungeon" (tagID 81) -- the very marker
+-- the game itself draws as a "D" beside a quest level. Reading that tag from the
+-- client's own API keeps this zero-maintenance: when the database gains a new
+-- dungeon, the client already tags its quests and no id list here needs updating.
+-- C_QuestLog.GetQuestTagInfo returns a table on newer clients; the plain global
+-- returns positional values on older ones. A positive hit is cached permanently
+-- (a quest's tag never changes); a miss is left uncached so a later paint can pick
+-- up a tag the client had not loaded yet.
+local dungeonCache = {}
+local QUEST_TAG_DUNGEON = 81
+
+function Q.IsDungeon(id)
+    if not id then return false end
+    if dungeonCache[id] then return true end
+    local tagID
+    if QL.GetQuestTagInfo then
+        local ok, r1 = pcall(QL.GetQuestTagInfo, id)
+        if ok then
+            if type(r1) == "table" then tagID = r1.tagID or r1[1] else tagID = r1 end
+        end
+    end
+    if tagID == nil and type(GetQuestTagInfo) == "function" then
+        local ok, r1 = pcall(GetQuestTagInfo, id)
+        if ok then
+            if type(r1) == "table" then tagID = r1.tagID or r1[1] else tagID = r1 end
+        end
+    end
+    if tagID == QUEST_TAG_DUNGEON then
+        dungeonCache[id] = true
+        return true
+    end
+    return false
+end
+
 function Q.Done(id)
     local hit = doneCache[id]
     if hit ~= nil then return hit end

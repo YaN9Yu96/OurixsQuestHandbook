@@ -29,6 +29,7 @@
 
 - **任务链视图**：按地区 / 副本 / 职业 / 专业 / 特殊分类浏览，绘制任务链关系，前置关系一眼可见。
 - **任务状态**：已完成、进行中、可交付、可接取、条件不足分色显示，状态直接读客户端，不存本地记录。
+- **地下城标记**：地下城任务的等级后带原生 `D` 后缀（如 `[17D]`），标记读客户端任务标签，随数据自动更新、无需维护任务清单。
 - **奖励图标**：任务行按数据列出该任务的奖励物品图标，并在有经验 / 金钱奖励时追加经验符文与金钱硬币图标（硬币按金额分铜 / 银 / 金三档显示）；悬停物品显示原生游戏物品提示，悬停经验 / 金钱则显示具体数值。
 - **详情提示**：悬停显示等级、接取地点、前置清单、是否为无限服新增内容。
 - **NPC 伴随面板**：与 NPC 对话任务信息时，右侧同步显示该 NPC 的前序 / 当前 / 后续任务。
@@ -89,6 +90,7 @@ A quest chain handbook: categories on the left, quest chains on the right, every
 
 - **Chain view** — browse by zone / dungeon / class / profession / special; quest chain relationships are drawn out, so prerequisites are visible at a glance.
 - **Quest state** — completed, in progress, ready to hand in, available and locked are colour-coded; read live from the client (no local bookkeeping).
+- **Dungeon marker** — dungeon quests carry a native `D` suffix on their level (e.g. `[17D]`), read from the client's quest tag so it stays current with the data and needs no maintained quest list.
 - **Reward icons** — each row lists the quest's reward items as game icons, followed by an experience rune and a money coin when the quest grants XP / gold (the coin switches between copper / silver / gold by amount); hovering shows the native item tooltip, or a line with the exact XP / money amount.
 - **Rich tooltip** — level, accept location, prerequisite list, and whether the quest is Forever-only content.
 - **NPC companion panel** — while an NPC's quest dialogue is open, its previous / current / next quests are shown alongside.

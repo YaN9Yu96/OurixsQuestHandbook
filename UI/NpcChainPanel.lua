@@ -152,7 +152,9 @@ function P:Show(qid)
         row.dot:SetVertexColor(r, g, b, 1)
         row.tag:SetText(item.tag)
         local level = ns.Q.Level(q.id, q.level)
-        local head = level and ("[" .. level .. "] ") or ""
+        -- Native "D" suffix for dungeon quests (tagID 81 via the client API).
+        local dungeonTag = (level and ns.Q.IsDungeon(q.id)) and "D" or ""
+        local head = level and ("[" .. level .. dungeonTag .. "] ") or ""
         row.text:SetText(hex(r, g, b) .. head .. ns.Q.Title(q.id, nil) .. "|r")
         row:Show()
         y = y + ROW_H
