@@ -93,6 +93,42 @@ end
 -- an icon shows the native item tooltip (GameTooltip) -- no text in the row itself.
 
 local ICON, RGAP = 16, 3
+-- Native Blizzard icons used for the two non-item rewards: a rune for experience and
+-- the client's own coin textures for money. All are core client assets, never another
+-- addon's. Money is tiered by magnitude so the icon reads like the amount: copper below
+-- one silver, silver below one gold, gold from one gold up (1s = 100c, 1g = 10000c).
+local XP_ICON = "Interface\\Icons\\XP_ICON"
+local COPPER_ICON = "Interface\\MoneyFrame\\UI-CopperIcon"
+local SILVER_ICON = "Interface\\MoneyFrame\\UI-SilverIcon"
+local GOLD_ICON   = "Interface\\MoneyFrame\\UI-GoldIcon"
+local COPPER_PER_SILVER, COPPER_PER_GOLD = 100, 10000
+local function moneyIcon(copper)
+    if copper >= COPPER_PER_GOLD then return GOLD_ICON end
+    if copper >= COPPER_PER_SILVER then return SILVER_ICON end
+    return COPPER_ICON
+end
+-- C_CurrencyInfo on modern clients, plain global on older ones (Questie does the same).
+local coinString = (C_CurrencyInfo and C_CurrencyInfo.GetCoinTextureString)
+    or GetCoinTextureString
+
+-- Thousands separator for XP numbers (no locale grouping in the client's formatter).
+local function groupDigits(n)
+    local s = tostring(math.floor(n or 0))
+    local head, rest = s:sub(1, #s % 3)
+    if head == "" then head = s:sub(1, 3) end
+    local tail = s:sub(#head + 1)
+    return head .. tail:gsub("%d%d%d", ",%0")
+end
+
+-- Hover tooltip for the XP / money icons: a single gold-labelled line, matching the
+-- row's native-tooltip style without dumping the whole quest tooltip on the player.
+local function showRewardTooltip(owner, label, value)
+    local tt = GameTooltip
+    tt:SetOwner(owner, "ANCHOR_RIGHT")
+    tt:ClearLines()
+    tt:AddLine(label .. ": " .. value, 1, 0.82, 0)
+    tt:Show()
+end
 
 -- This client exposes item data ONLY through the tooltip: GetItemIcon, GetItemInfoInstant
 -- and GetItemInfo are all absent, while GameTooltip:SetItemByID works (the hover tooltip
@@ -288,7 +324,16 @@ local function ensureRewardIcon(row, i)
         if row.bg then
             row.bg:SetVertexColor(TH.rowHover[1], TH.rowHover[2], TH.rowHover[3], 0.85)
         end
-        if btn.itemId then showItemTooltip(btn, btn.itemId) end
+        if btn.rewardKind == "xp" then
+            showRewardTooltip(btn, ns.L["Experience"],
+                groupDigits(btn.rewardValue) .. " " .. ns.L["XP"])
+        elseif btn.rewardKind == "money" then
+            local text = coinString and coinString(btn.rewardValue)
+                or tostring(btn.rewardValue)
+            showRewardTooltip(btn, ns.L["Money"], text)
+        elseif btn.itemId then
+            showItemTooltip(btn, btn.itemId)
+        end
     end)
     btn:SetScript("OnLeave", function()
         local TH = W.Theme
@@ -302,25 +347,55 @@ local function ensureRewardIcon(row, i)
     return btn
 end
 
--- Width in px of a reward strip for `n` items (0 when none). No positioning here; the
+-- Width in px of a reward strip for `n` icons (0 when none). No positioning here; the
 -- strip is placed by paintRow to the LEFT of the badge strip (per request).
 local function rewardWidth(n)
     if not n or n <= 0 then return 0 end
     return n * ICON + (n - 1) * RGAP
 end
 
+-- Build the unified reward list for a quest: reward items first, then optional experience
+-- and money entries. Each entry is { kind = "item"|"xp"|"money", value = ... }.
+-- Only rewards that actually exist are included, so no icon shows for an empty reward.
+local function rewardEntries(q)
+    local out = {}
+    for _, id in ipairs(ns.Rewards.ForQuest(q.id) or {}) do
+        out[#out + 1] = { kind = "item", value = id }
+    end
+    local xp = ns.Rewards.XP(q.id)
+    if xp then out[#out + 1] = { kind = "xp", value = xp } end
+    local money = ns.Rewards.Money(q.id)
+    if money then out[#out + 1] = { kind = "money", value = money } end
+    return out
+end
+
 -- Place the reward icon strip with its RIGHT edge at `rightEdge` (x offset from the row's
 -- right edge), marching LEFTWARD so it grows away from the badge anchor. Hides any surplus
--- icons from a previously wider row.
-local function paintRewardStrip(row, list, n, rightEdge)
+-- icons from a previously wider row. Each entry drives its own texture and tooltip payload.
+local function paintRewardStrip(row, list, rightEdge)
     local icons = row.rewardIcons or {}
     row.rewardIcons = icons
     for i = 1, #icons do icons[i]:Hide() end
     local cursor = 0
-    for i = 1, n do
+    for i = 1, #list do
+        local e = list[i]
         local btn = ensureRewardIcon(row, i)
-        btn.tex:SetTexture(itemIcon(list[i]))
-        btn.itemId = list[i]
+        if e.kind == "xp" then
+            btn.tex:SetTexture(XP_ICON)
+            btn.tex:SetTexCoord(0, 1, 0, 1)   -- core icons have no padding to trim
+            btn.rewardKind, btn.rewardValue = "xp", e.value
+            btn.itemId = nil
+        elseif e.kind == "money" then
+            btn.tex:SetTexture(moneyIcon(e.value))
+            btn.tex:SetTexCoord(0, 1, 0, 1)   -- small coin texture; trimming clips it
+            btn.rewardKind, btn.rewardValue = "money", e.value
+            btn.itemId = nil
+        else
+            btn.tex:SetTexture(itemIcon(e.value))
+            btn.tex:SetTexCoord(0.08, 0.92, 0.08, 0.92)  -- item icons carry built-in padding
+            btn.itemId = e.value
+            btn.rewardKind, btn.rewardValue = nil, nil
+        end
         btn:ClearAllPoints()
         btn:SetSize(ICON, ICON)
         btn:SetPoint("RIGHT", row, "RIGHT", rightEdge - cursor, 0)
@@ -534,9 +609,10 @@ local function paintRow(view, row, item, selectedId, rightReserve)
     for _, pill in pairs(row.tags) do pill:Hide() end
     -- Reward icon strip is computed first (width only); it is painted LEFT of the badge
     -- strip after the badges are laid out, so the order right-to-left is: status,
-    -- badges, then reward icons. The title truncates left of the reward strip.
-    local rewardList = ns.Rewards.ForQuest(q.id)
-    local nRew = rewardList and #rewardList or 0
+    -- badges, then reward icons (items, then XP, then money). The title truncates left of
+    -- the reward strip. A row with no rewards at all produces no icons and no reserved width.
+    local rewards = rewardEntries(q)
+    local nRew = #rewards
     local stripW = rewardWidth(nRew)
     -- Right-aligned capsule strip: NEW first, then every "your character can
     -- never take this" marker. Laid out right-to-left so the status column keeps
@@ -565,7 +641,7 @@ local function paintRow(view, row, item, selectedId, rightReserve)
     -- Reward icons: to the LEFT of the badge strip (right edge sits 4px left of the
     -- leftmost badge). Painted after badges so we know where they end. Always invoked so a
     -- row recycled from a quest with rewards to one without clears its leftover icons.
-    paintRewardStrip(row, rewardList, nRew, badgeX - 4)
+    paintRewardStrip(row, rewards, badgeX - 4)
 
     row.title:ClearAllPoints()
     row.title:SetPoint("LEFT", row, "LEFT", titleX, 0)
