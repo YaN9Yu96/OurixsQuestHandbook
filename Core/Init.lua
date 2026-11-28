@@ -227,6 +227,7 @@ local EVENTS = {
     "QUEST_DATA_LOAD_RESULT",
     "QUEST_DETAIL", "QUEST_PROGRESS", "QUEST_COMPLETE",
     "QUEST_FINISHED", "QUEST_GREETING", "GOSSIP_CLOSED", "WORLD_MAP_UPDATE",
+    "ZONE_CHANGED_NEW_AREA",
 }
 for _, name in ipairs(EVENTS) do pcall(ev.RegisterEvent, ev, name) end
 
@@ -274,6 +275,12 @@ ev:SetScript("OnEvent", function(_, event, arg1, arg2)
         ns.NpcPanel:Hide()
     elseif event == "WORLD_MAP_UPDATE" then
         ns.Map.OnMapChanged()
+    elseif event == "ZONE_CHANGED_NEW_AREA" then
+        -- Keep the footer's "jump to current zone" label in sync while the window
+        -- is open. No full refresh: the quest list does not change on a zone change.
+        if ns.Main and ns.Main.IsShown and ns.Main:IsShown() then
+            ns.Main:UpdateZoneButton()
+        end
     elseif event == "PLAYER_ENTERING_WORLD" then
         ns.Q.Invalidate()
         ns.RefreshSoon()

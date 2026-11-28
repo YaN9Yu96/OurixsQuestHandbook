@@ -218,10 +218,35 @@ function M.Create()
     foot:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 4, 4)
     foot:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -4, 4)
     foot:SetHeight(20)
+    -- Footer-left shortcut: jump to the entry matching the player's current map.
+    -- Sits inside the footer, so the status text below simply starts to its right.
+    f.zoneBtn = W.Button(foot, "", 190, 18)
+    f.zoneBtn:SetPoint("LEFT", foot, "LEFT", 4, 0)
+    f.zoneBtn:SetScript("OnClick", function()
+        local eid = ns.Chains.CurrentZoneEntry and ns.Chains.CurrentZoneEntry() or nil
+        if not eid then return end
+        -- An explicit click always jumps, regardless of the "open at current zone"
+        -- setting. Clear any search first so the target cannot be filtered out, then
+        -- SelectEntry drops the jump exemption and returns to the normal tree;
+        -- RevealSelected expands and scrolls to the target category.
+        if M.ClearSearch then M:ClearSearch() end
+        M:SelectEntry(eid)
+        M:RevealSelected()
+    end)
     f.info = W.SmallFont(foot, 10)
-    f.info:SetPoint("LEFT", foot, "LEFT", 8, 0)
+    f.info:SetPoint("LEFT", f.zoneBtn, "RIGHT", 10, 0)
     f.info:SetPoint("RIGHT", foot, "RIGHT", -24, 0)
     f.info:SetJustifyH("LEFT")
+    -- The button template's label (GameFontHighlightSmall) renders a touch larger
+    -- than the footer status text beside it. Copy the status text's actual font --
+    -- face, size and flags -- so the two labels read at exactly one size. Colour is
+    -- set by W.Button's SetTextColor and is untouched by SetFont.
+    if f.zoneBtn.label.GetFont and f.info.GetFont then
+        local ok, path, size, flags = pcall(f.info.GetFont, f.info)
+        if ok and path and size then
+            pcall(f.zoneBtn.label.SetFont, f.zoneBtn.label, path, size, flags or "")
+        end
+    end
 
     local grip = CreateFrame("Button", nil, f)
     grip:SetSize(18, 18)
@@ -330,6 +355,23 @@ function M:UpdateInfo(f, entryId, done, total, title)
     end
     f.info:SetText("|cffd9ae5f" .. name .. "|r   |cff9E968A" ..
         ns.L["Progress: %d/%d"]:format(done or 0, total or 0) .. "|r")
+end
+
+-- Footer-left button label: the entry for the map the player is currently on.
+-- The name is the same localised entry name the footer shows, i.e. the current
+-- map's entry name. When there is no matching entry (very early login, or a map
+-- with no handbook page), fall back to a plain label with no region name.
+function M:UpdateZoneButton()
+    local f = self.frame
+    if not (f and f.zoneBtn) then return end
+    local eid = ns.Chains.CurrentZoneEntry and ns.Chains.CurrentZoneEntry() or nil
+    local entry = eid and ns.Source.byId and ns.Source.byId[eid]
+    local zone = entry and ns.Chains.EntryName(entry)
+    if zone and zone ~= "" then
+        f.zoneBtn:SetLabel(ns.L["Jump to current zone (%s)"]:format(zone))
+    else
+        f.zoneBtn:SetLabel(ns.L["Jump to current zone"])
+    end
 end
 
 local function isFlatMode()
@@ -509,6 +551,7 @@ function M:Refresh()
     if not f then return end
     f.factionBtn:SetIndex(ns.faction == "Horde" and 2 or 1)
     f.hideBtn:SetSelected(ns.char.hideCompleted and true or false)
+    self:UpdateZoneButton()
 
     local groups = ns.Chains.Categories(ns.faction, ns.search)
     local flat = isFlatMode()
