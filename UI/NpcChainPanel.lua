@@ -44,7 +44,7 @@ local function acquire(f, i)
     if row.SetHighlightTexture then pcall(row.SetHighlightTexture, row, W.QuestHighlight, "ADD") end
     row:SetScript("OnEnter", function()
         if not row.current then bg:SetVertexColor(0.85, 0.70, 0.32, 0.16) end
-        ns.Tooltip.Show(row, row.quest, nil, true)
+        ns.Tooltip.Show(row, row.quest, nil, "none")
     end)
     row:SetScript("OnLeave", function()
         bg:SetVertexColor(0.85, 0.70, 0.32, row.current and 0.22 or 0)

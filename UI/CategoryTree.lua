@@ -10,6 +10,11 @@ local ROW_H, HEADER_H = 25, 26
 -- Three distinct type sizes: group header > entry name > level/progress meta.
 local FONT_HDR, FONT_ROW, FONT_META = 12, 10, 9
 
+-- Pinned quick-find buttons sit ABOVE the scroll child, so they never scroll away.
+-- PIN_AREA is how far the scroll region is pushed down to make room for the two rows.
+local PIN_H, PIN_GAP = 24, 2
+local PIN_AREA = PIN_H * 2 + PIN_GAP + 4
+
 -- Rows are pooled and reused for BOTH group headers and entry rows. Every visual
 -- property therefore has to be re-applied on each pass -- a font size set for a child
 -- row would otherwise leak into the header that recycles the same frame next refresh
@@ -40,10 +45,80 @@ local function paintLabel(row, selected, state)
     row.label:SetTextColor(c[1], c[2], c[3])
 end
 
+-- Build one pinned quick-find button. It is a child of the panel (not the scroll child)
+-- so it stays put while the category list scrolls underneath it.
+local function makePin(f, mode, labelKey, y)
+    local TH = W.Theme
+    local btn = CreateFrame("Button", nil, f)
+    btn:SetHeight(PIN_H)
+    btn:SetPoint("TOPLEFT", f, "TOPLEFT", 2, -y)
+    btn:SetPoint("TOPRIGHT", f, "TOPRIGHT", -2, -y)
+
+    local bg = btn:CreateTexture(nil, "BACKGROUND")
+    bg:SetAllPoints(btn)
+    bg:SetTexture(WHITE)
+    bg:SetVertexColor(TH.top[1], TH.top[2], TH.top[3], TH.top[4] or 1)
+    btn.bg = bg
+
+    local bar = btn:CreateTexture(nil, "OVERLAY")
+    bar:SetTexture(WHITE)
+    bar:SetVertexColor(TH.accent[1], TH.accent[2], TH.accent[3], 1)
+    bar:SetWidth(3)
+    bar:SetPoint("TOPLEFT", btn, "TOPLEFT", 0, 0)
+    bar:SetPoint("BOTTOMLEFT", btn, "BOTTOMLEFT", 0, 0)
+    bar:Hide()
+    btn.bar = bar
+
+    btn.label = W.Font(btn, "GameFontNormalSmall")
+    -- These two are top-level "collection" tabs, not child pages: match the size of
+    -- the collapsible group headers (FONT_HDR), not the smaller entry rows (FONT_ROW).
+    setSize(btn.label, FONT_HDR)
+    btn.label:SetJustifyH("LEFT")
+    btn.label:SetWordWrap(false)
+    btn.label:SetPoint("LEFT", btn, "LEFT", 18, 0)
+    btn.label:SetPoint("RIGHT", btn, "RIGHT", -46, 0)
+    btn.label:SetText(ns.L[labelKey])
+    btn.label:SetTextColor(TH.accent[1], TH.accent[2], TH.accent[3])
+
+    btn.meta = W.Font(btn, "GameFontHighlightSmall")
+    setSize(btn.meta, FONT_META)
+    btn.meta:SetJustifyH("RIGHT")
+    btn.meta:SetWordWrap(false)
+    btn.meta:SetPoint("RIGHT", btn, "RIGHT", -8, 0)
+    btn.meta:SetTextColor(TH.muted[1], TH.muted[2], TH.muted[3])
+
+    btn.mode = mode
+    btn.base = TH.top
+    btn:SetScript("OnClick", function()
+        if ns.Main and ns.Main.SelectViewMode then ns.Main:SelectViewMode(mode) end
+    end)
+    btn:SetScript("OnEnter", function()
+        if btn.selected then return end
+        bg:SetVertexColor(TH.rowHover[1], TH.rowHover[2], TH.rowHover[3], TH.rowHover[4] or 1)
+    end)
+    btn:SetScript("OnLeave", function()
+        if btn.selected then return end
+        local c = btn.base or TH.top
+        bg:SetVertexColor(c[1], c[2], c[3], c[4] or 1)
+    end)
+    return btn
+end
+
 function T.Create(parent)
     local f = W.Panel(parent)
+    f.pins = {
+        makePin(f, "active",   "Current Quests",  2),
+        makePin(f, "favorite", "Favorite Quests", 2 + PIN_H + PIN_GAP),
+    }
+    -- Hairline separating the pinned block from the scrolling category tree.
+    local rule = f:CreateTexture(nil, "ARTWORK")
+    rule:SetColorTexture(W.Theme.line[1], W.Theme.line[2], W.Theme.line[3], 0.7)
+    rule:SetHeight(1)
+    rule:SetPoint("TOPLEFT", f, "TOPLEFT", 2, -PIN_AREA + 2)
+    rule:SetPoint("TOPRIGHT", f, "TOPRIGHT", -2, -PIN_AREA + 2)
+
     local sf = W.Scroll(f)
-    sf:SetPoint("TOPLEFT", f, "TOPLEFT", 2, -2)
+    sf:SetPoint("TOPLEFT", f, "TOPLEFT", 2, -PIN_AREA)
     sf:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -2, 2)
     sf.child:SetWidth(200)
     f.scroll = sf
@@ -52,6 +127,21 @@ function T.Create(parent)
         sf.child:SetWidth(math.max(160, f:GetWidth() - 10))
     end)
     return f
+end
+
+-- Reflect the active quick view on the pinned buttons. `counts` maps "active" and
+-- "favorite" to the number of quests each list currently holds, shown as small meta.
+function T:SetViewMode(mode, counts)
+    local TH = W.Theme
+    counts = counts or {}
+    for _, btn in ipairs(self.pins or {}) do
+        local on = btn.mode == mode
+        btn.selected = on
+        btn.base = on and TH.rowSel or TH.top
+        btn.bg:SetVertexColor(btn.base[1], btn.base[2], btn.base[3], btn.base[4] or 1)
+        btn.bar:SetShown(on)
+        btn.meta:SetText(tostring(counts[btn.mode] or 0))
+    end
 end
 
 local function acquire(f, i)
@@ -214,6 +304,25 @@ function T:Update(groups, selectedId)
     end
     child:SetHeight(math.max(1, y))
     if self.scroll.UpdateThumb then self.scroll:UpdateThumb() end
+end
+
+-- Bring a category row into view after a jump or on window open. The row must already
+-- exist (its group expanded by the caller); this only moves the scrollbar.
+function T:ScrollToEntry(id)
+    if not id then return false end
+    local sf = self.scroll
+    if not sf then return false end
+    for _, row in ipairs(self.rows) do
+        if row:IsShown() and row.entryId == id then
+            local vh = sf:GetHeight() or 0
+            local max = math.max(0, (sf.child:GetHeight() or 0) - vh)
+            local target = (row.y or 0) - vh / 2 + (row:GetHeight() or ROW_H) / 2
+            sf:SetVerticalScroll(math.max(0, math.min(max, target)))
+            if sf.UpdateThumb then sf.UpdateThumb() end
+            return true
+        end
+    end
+    return false
 end
 
 -- Light-weight selection change: recolour the pooled rows in place instead of running

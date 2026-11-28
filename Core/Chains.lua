@@ -495,6 +495,14 @@ local function activeSet()
     return set
 end
 
+-- Quest ids currently in the log, used by the pinned "current quests" list. Returns a
+-- plain array (not the internal set) so callers can hand it straight to the flat builder.
+function C.ActiveQuestIds()
+    local out = {}
+    for id in pairs(activeSet()) do out[#out + 1] = id end
+    return out
+end
+
 -- "Could be accepted right now": same rules as Q.Status, without building the
 -- localized reason strings, because this runs for every visible quest of every page.
 function C.CanAccept(q)
@@ -818,6 +826,34 @@ function C.BuildView(entryId, faction, filter)
         end
     end
     return rows, done, total, chainIndex
+end
+
+-- Flat, chain-free rows for the two pinned quick-find categories ("current quests"
+-- and "favorites"). These are a query aid, not a browsable page: every quest is one
+-- standalone row with no chain lines, no fold button and no cross-chain triangles
+-- (the `search` flag already suppresses all three in ChainView). No faction / race /
+-- class / hide-completed gate is applied -- the two lists are exactly what the player
+-- asked to see, and jumping into them is blocked at the UI layer instead.
+-- Returns rows, done, total so callers can reuse the same footer as a normal page.
+function C.BuildFlatView(ids)
+    local flat, seen = {}, {}
+    for _, id in ipairs(ids or {}) do
+        local q = ns.Source.Get(id)
+        if q and not seen[id] then
+            seen[id] = true
+            flat[#flat + 1] = {
+                q = q, chain = #flat + 1, chainKey = q.id, chainSet = {},
+                chainCount = 1, chainIndex = #flat + 1,
+                isStart = true, isEnd = true, single = true,
+                indent = false, collapsed = nil, search = true, flat = true,
+                lineTop = false, lineBottom = false,
+            }
+        end
+    end
+    table.sort(flat, function(a, b) return questSorter(a.q, b.q) end)
+    local done = 0
+    for _, item in ipairs(flat) do if ns.Q.Done(item.q.id) then done = done + 1 end end
+    return flat, done, #flat
 end
 
 -- chainSet suppresses only the "Requires: ..." reasons for quests inside the

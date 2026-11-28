@@ -17,9 +17,11 @@ end
 -- about *which* quest to go and do. Each prerequisite is printed with its own live state
 -- (completed / in progress / available / locked + short reason) so a blocked quest is
 -- actionable straight from the tooltip.
--- readOnly suppresses the click hints: the NPC companion panel is a read-only view, so
--- advertising "left-click marks the map" there would describe something that no longer
--- happens.
+-- hintMode controls the click-hint footer: nil = the normal chain-page hints;
+-- "none" = no hints (the NPC companion panel is a read-only view, so advertising
+-- "left-click marks the map" there would describe something that no longer happens);
+-- "flat" = a single "left-click jumps to the source page" hint for the pinned
+-- quick-find lists, whose rows have only that one gesture.
 
 -- Keep the list short enough that the tooltip never grows past the screen; a quest with
 -- a dozen prerequisites reports the remainder instead of wrapping into a wall of text.
@@ -164,7 +166,7 @@ local function addFollowUps(tt, q, chainSet)
     end
 end
 
-function T.Show(owner, q, item, readOnly)
+function T.Show(owner, q, item, hintMode)
     if not owner or not q then return end
     local tt = GameTooltip
     tt:SetOwner(owner, "ANCHOR_RIGHT")
@@ -232,14 +234,19 @@ function T.Show(owner, q, item, readOnly)
     if q.isNew then tt:AddLine(ns.L["NEW IN FOREVER"], 0.275, 0.749, 0.447) end
 
     tt:AddLine(ns.L["Data origin"] .. ": " .. ns.L["QuestieDB"], 0.55, 0.62, 0.70)
-    if not readOnly then
+    if hintMode ~= "none" then
         -- Collect the applicable hints first: one blank line goes in front of the FIRST
         -- hint only, so they read as a single footer paragraph, and a tooltip with no
         -- applicable hint never ends on a stray empty line.
         local hints = {}
+        if hintMode == "flat" then
+            -- Pinned quick-find rows have their own single gesture: a plain left click
+            -- hands the player back to the quest's real category page / source entry.
+            hints[#hints + 1] = ns.L["Left-click: jump to source page"]
+        end
         -- Only offer the pin when there is somewhere to pin: an item-started quest with
         -- a known drop spot qualifies, a quest with no coordinates at all does not.
-        if markLoc then
+        if hintMode ~= "flat" and markLoc then
             hints[#hints + 1] = ns.L["Left-click: mark start on map"]
         end
         -- Offer the jump whenever the edge exists AND it is outside the current chain (an
@@ -247,13 +254,13 @@ function T.Show(owner, q, item, readOnly)
         -- A target the filters currently hide still gets the hint: the click answers with
         -- the gate name, which is more useful than a row that visibly marks a dependency
         -- and then swallows the click.
-        if ns.Chains.PreJumpTarget(q, item and item.chainSet) then
+        if hintMode ~= "flat" and ns.Chains.PreJumpTarget(q, item and item.chainSet) then
             hints[#hints + 1] = ns.L["Right-click: jump to previous"]
         end
-        if ns.Chains.PostJumpTarget(q, item and item.chainSet) then
+        if hintMode ~= "flat" and ns.Chains.PostJumpTarget(q, item and item.chainSet) then
             hints[#hints + 1] = ns.L["Shift+right-click: jump to follow-up"]
         end
-        if ns.Q.Active(q.id) then
+        if hintMode ~= "flat" and ns.Q.Active(q.id) then
             hints[#hints + 1] = ns.L["Shift+Click: open quest log"]
         end
         if #hints > 0 then

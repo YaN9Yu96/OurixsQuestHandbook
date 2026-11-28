@@ -155,9 +155,11 @@ function M.Create()
         if text == ns.search then return end
         ns.search = text
         -- A real search means the player is browsing again: drop the single-quest
-        -- jump exemption. The programmatic clear below sets ns.search first, so its
-        -- deferred applySearch("") returns at the guard above and keeps the exemption.
+        -- jump exemption and leave any pinned quick-find list. The programmatic clear
+        -- below sets ns.search first, so its deferred applySearch("") returns at the
+        -- guard above and keeps the exemption.
         ns.focusQuestId = nil
+        ns.viewMode = "normal"
         M:Refresh()
         M:ResetScroll()
     end
@@ -318,12 +320,53 @@ function M:ResetScroll()
 end
 
 -- Footer summary (entry name + progress). Shared by the full and the light refresh.
-function M:UpdateInfo(f, entryId, done, total)
+-- The pinned flat lists pass their own title instead of an entry id.
+function M:UpdateInfo(f, entryId, done, total, title)
     if not (f and f.info) then return end
-    local entry = ns.Source.byId and ns.Source.byId[entryId]
-    local name = entry and ns.Chains.EntryName(entry) or ""
+    local name = title
+    if not name then
+        local entry = ns.Source.byId and ns.Source.byId[entryId]
+        name = entry and ns.Chains.EntryName(entry) or ""
+    end
     f.info:SetText("|cffd9ae5f" .. name .. "|r   |cff9E968A" ..
         ns.L["Progress: %d/%d"]:format(done or 0, total or 0) .. "|r")
+end
+
+local function isFlatMode()
+    return ns.viewMode == "active" or ns.viewMode == "favorite"
+end
+
+local function flatQuestIds()
+    if ns.viewMode == "active" then return ns.Chains.ActiveQuestIds() end
+    if ns.viewMode == "favorite" then return ns.FavoriteQuestIds() end
+    return nil
+end
+
+local function pinCounts()
+    return {
+        active = #ns.Chains.ActiveQuestIds(),
+        favorite = #ns.FavoriteQuestIds(),
+    }
+end
+
+-- Clicking a pinned button switches the right-hand pane to a flat, chain-free list.
+-- It never touches selectedEntry, so returning to normal restores the previous page.
+-- A stale filter is cleared first: the flat list is a quick query, not another page to
+-- filter, and a leftover search box would be misleading over an unfiltered result.
+function M:SelectViewMode(mode)
+    if mode ~= "active" and mode ~= "favorite" then return end
+    local f = self.frame
+    if not f then return end
+    ns.viewMode = mode
+    ns.focusQuestId = nil
+    ns.selectedQuest = nil
+    if self.ClearSearch then self:ClearSearch() end
+    self:Refresh()
+    local sf = f.view and f.view.scroll
+    if sf then
+        sf:SetVerticalScroll(0)
+        if sf.UpdateThumb then sf.UpdateThumb() end
+    end
 end
 
 -- Clicking an entry only needs the right-hand pane to change, so do NOT run a full
@@ -331,14 +374,19 @@ end
 -- expand/collapse state. Only the quest list scrolls back to the top.
 function M:SelectEntry(id)
     if not id then return end
-    -- Manual navigation ends the single-quest jump exemption.
+    -- Manual navigation ends the single-quest jump exemption and leaves any pinned
+    -- quick-find list; selecting a category always returns to the normal chain view.
     ns.focusQuestId = nil
+    ns.viewMode = "normal"
     local f = self.frame
     ns.selectedEntry = id
     ns.selectedQuest = nil
     ns.char.selectedEntry = id
     if not f then return end
-    if f.tree then ns.Tree.SetSelected(f.tree, id) end
+    if f.tree then
+        ns.Tree.SetViewMode(f.tree, ns.viewMode, pinCounts())
+        ns.Tree.SetSelected(f.tree, id)
+    end
     local rows, done, total = ns.Chains.BuildView(id, ns.faction, ns.search)
     ns.ChainView.Update(f.view, rows, nil)
     self:UpdateInfo(f, id, done, total)
@@ -368,6 +416,10 @@ local JUMP_REFUSED = {
 }
 function M:FocusQuest(id)
     if not id then return end
+    -- A jump always lands on a real category page: the pinned "current/favorite" lists
+    -- are query aids and can never be a jump target. Exiting flat mode here covers the
+    -- case where the jump was triggered from one of those lists.
+    ns.viewMode = "normal"
     -- A jump lands on the quest the player clicked, so clear any stale search and
     -- exempt this one quest from every filter. Neither changes a saved user setting.
     if self.ClearSearch then self:ClearSearch() end
@@ -423,6 +475,7 @@ function M:FocusQuest(id)
     end
     ns.selectedQuest = id
     self:Refresh()
+    self:RevealSelected()
     ns.ChainView.ScrollToQuest(self.frame.view, id)
 end
 
@@ -432,6 +485,7 @@ function M:SetFaction(faction)
     -- may have been released; rebuild before touching byId / entries.
     if ns.EnsureData then ns.EnsureData() end
     ns.focusQuestId = nil
+    ns.viewMode = "normal"
     ns.faction = faction
     ns.char.faction = faction
     local entry = ns.Source.byId and ns.Source.byId[ns.selectedEntry]
@@ -457,10 +511,11 @@ function M:Refresh()
     f.hideBtn:SetSelected(ns.char.hideCompleted and true or false)
 
     local groups = ns.Chains.Categories(ns.faction, ns.search)
-    -- Deliberately NO force-expand and NO auto-scroll here. Forcing the selected
-    -- group open on every refresh made the tree reflow under the cursor and overrode
-    -- the player's own collapse state. The selected row is highlighted only when its
-    -- group happens to be open.
+    local flat = isFlatMode()
+    -- Deliberately NO force-expand and NO auto-scroll on ordinary refreshes (typing,
+    -- toggling a filter, a background log event). Forcing the selected group open on
+    -- every refresh made the tree reflow under the cursor and overrode the player's own
+    -- collapse state. Reveal on open/jump is done explicitly by RevealSelected below.
     local found = false
     for _, g in ipairs(groups) do
         for _, item in ipairs(g.entries) do
@@ -474,10 +529,45 @@ function M:Refresh()
         ns.selectedQuest = nil
     end
 
+    -- Pin highlight + counts are refreshed on every path (including the light
+    -- SelectEntry path, which calls this same setter directly). In flat mode pass an
+    -- explicit nil as the selected id: `flat and nil or id` is a classic Lua trap --
+    -- nil is falsy, so it falls through to id and leaves the old page highlighted.
+    local treeSelected = nil
+    if not flat then treeSelected = ns.selectedEntry end
+    ns.Tree.Update(f.tree, groups, treeSelected)
+    ns.Tree.SetViewMode(f.tree, ns.viewMode, pinCounts())
+
+    local rows, done, total, infoTitle
+    if flat then
+        rows, done, total = ns.Chains.BuildFlatView(flatQuestIds())
+        infoTitle = ns.L[ns.viewMode == "active" and "Current Quests" or "Favorite Quests"]
+    else
+        rows, done, total = ns.Chains.BuildView(ns.selectedEntry, ns.faction, ns.search)
+    end
+    local viewSelected = nil
+    if not flat then viewSelected = ns.selectedQuest end
+    ns.ChainView.Update(f.view, rows, viewSelected)
+    self:UpdateInfo(f, ns.selectedEntry, done, total, infoTitle)
+end
+
+-- Expand and reveal the selected category after opening the window or jumping to a
+-- quest. Only these two moments move the tree: normal refreshes leave it untouched.
+function M:RevealSelected()
+    local f = self.frame
+    if not f or not f.tree or isFlatMode() then return end
+    local groups = ns.Chains.Categories(ns.faction, ns.search)
+    for _, g in ipairs(groups) do
+        for _, item in ipairs(g.entries) do
+            if item.entry.id == ns.selectedEntry then
+                ns.char.collapsed[g.id] = false
+                break
+            end
+        end
+    end
     ns.Tree.Update(f.tree, groups, ns.selectedEntry)
-    local rows, done, total = ns.Chains.BuildView(ns.selectedEntry, ns.faction, ns.search)
-    ns.ChainView.Update(f.view, rows, ns.selectedQuest)
-    self:UpdateInfo(f, ns.selectedEntry, done, total)
+    ns.Tree.SetViewMode(f.tree, ns.viewMode, pinCounts())
+    ns.Tree.ScrollToEntry(f.tree, ns.selectedEntry)
 end
 
 -- Default view on open: the player's own faction and the map they are on.
@@ -506,9 +596,12 @@ function M:Toggle()
         -- pays for the index if the player opens the window before that timer fires.
         if ns.EnsureData then ns.EnsureData() end
         self:FollowCurrentZone()
+        -- Quick-find mode is transient: reopening always lands on the normal tree.
+        ns.viewMode = "normal"
         self.frame:Show()
         self:Refresh()
         self:ResetScroll()
+        self:RevealSelected()
     end
 end
 

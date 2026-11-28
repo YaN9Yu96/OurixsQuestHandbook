@@ -67,6 +67,10 @@ local function applyDefaults()
     ns.selectedQuest = nil
     -- Transient single-quest filter exemption set by a chain jump. Never persisted.
     ns.focusQuestId = nil
+    -- Which quick view the left column is showing: "normal" (category tree) or one of
+    -- the pinned flat lists ("active" / "favorite"). Transient view state, never saved:
+    -- reopening the handbook always returns to the ordinary category tree.
+    ns.viewMode = "normal"
 end
 
 -- Default page: the player's own faction and the map they are standing on.

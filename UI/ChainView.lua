@@ -56,31 +56,13 @@ local function hex(r, g, b)
         math.floor(g * 255 + 0.5), math.floor(b * 255 + 0.5))
 end
 
--- Right-side status column geometry. The status font is a fraction of the normal
--- (title) font, and BOTH the column width and the badge strip's starting point are
--- derived from that font instead of being frozen numbers. The old hardcoded 112px
--- column / 124px badge start were sized for a 9-point status font; once the font size
--- changes those numbers drift, which is why the badge start must be recomputed here.
-local STATUS_FONT_RATIO = 0.8   -- status = 0.8 x the normal (title) font size
+-- Right-side status column geometry. The status text uses its template's default
+-- size (no shrink). The column width and the badge strip's start are kept as the
+-- original fixed values tuned for that default font: 112px column, 124px badge start
+-- (STATUS_INSET + STATUS_W + STATUS_GAP).
 local STATUS_INSET = 8          -- status right edge, inset from the row's right edge
 local STATUS_GAP = 4            -- gap between the status column and the first badge
-local STATUS_PX_PER_POINT = 112 / 9  -- px-per-point the original 112px column was tuned for
-local STATUS_FONT_SIZE, STATUS_W    -- derived once, on first row creation
-
-local function statusMetrics(titleFont)
-    if STATUS_W then return end
-    local size = 12
-    local font = titleFont
-    if not font and UIParent then
-        font = UIParent:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    end
-    if font and font.GetFont then
-        local ok, _, s = pcall(font.GetFont, font)
-        if ok and type(s) == "number" and s > 0 then size = s end
-    end
-    STATUS_FONT_SIZE = math.max(6, math.floor(size * STATUS_FONT_RATIO + 0.5))
-    STATUS_W = math.floor(STATUS_FONT_SIZE * STATUS_PX_PER_POINT + 0.5)
-end
+local STATUS_W = 112            -- status column width (template default font)
 
 function V.Create(parent)
     local f = W.Panel(parent)
@@ -536,17 +518,10 @@ local function acquire(f, i)
     row.title = W.Font(row, "GameFontNormal")
     row.title:SetJustifyH("LEFT")
     if row.title.SetWordWrap then pcall(row.title.SetWordWrap, row.title, false) end
-    statusMetrics(row.title)  -- derive status font size / column width from the title font
     row.status = W.Font(row, "GameFontHighlightSmall")
-    -- 0.8x the normal (title) font size, keeping the small template's face / colour /
-    -- flags. GetFont -> SetFont is the client-agnostic way to resize a template font
-    -- string without losing what the template gave us.
-    if row.status.GetFont then
-        local ok, path, _, flags = pcall(row.status.GetFont, row.status)
-        if ok and path then
-            pcall(row.status.SetFont, row.status, path, STATUS_FONT_SIZE, flags or "")
-        end
-    end
+    -- Keep the template's default size: no SetFont shrink (the 0.8x experiment was
+    -- reverted as unreadable). Column width and badge anchor stay at their fixed
+    -- defaults, which were tuned for exactly this font.
     row.status:SetJustifyH("RIGHT")
     row.status:SetWidth(STATUS_W)
 
@@ -556,7 +531,10 @@ local function acquire(f, i)
     if row.SetHighlightTexture then pcall(row.SetHighlightTexture, row, W.QuestHighlight, "ADD") end
     row:SetScript("OnEnter", function()
         bg:SetVertexColor(TH.rowHover[1], TH.rowHover[2], TH.rowHover[3], 0.85)
-        ns.Tooltip.Show(row, row.quest, row.item)
+        -- Flat quick-find rows advertise their own single gesture instead of the
+        -- chain page's click hints, which do nothing here.
+        ns.Tooltip.Show(row, row.quest, row.item,
+            row.item and row.item.flat and "flat" or nil)
     end)
     row:SetScript("OnLeave", function()
         bg:SetVertexColor(TH.rowSel[1], TH.rowSel[2], TH.rowSel[3], row.selected and 0.9 or 0)
@@ -599,7 +577,6 @@ end
 -- Everything that has to be written on one row. Split out of the layout pass so a single
 -- quest can be repainted in place when its title arrives asynchronously.
 local function paintRow(view, row, item, selectedId, rightReserve)
-    statusMetrics()  -- ensure derived column width exists even on an early repaint path
     local TH = W.Theme
     local q = item.q
     row.quest, row.item = q, item
@@ -778,6 +755,22 @@ local function paintRow(view, row, item, selectedId, rightReserve)
     fav:Show()
 
     row:SetScript("OnClick", function(_, button)
+        -- Pinned quick-find rows ("current quests" / "favorite quests") are query
+        -- aids, not browsable pages. They expose exactly two gestures: Shift+Left
+        -- sends the quest link to chat (implemented in a later task), and a plain
+        -- Left jumps back to the quest's real category page / source entry. All
+        -- chain-navigation gestures (right-click pre/post, map pin, native log)
+        -- are deliberately absent here.
+        if item.flat then
+            if button == "RightButton" then return end
+            if IsShiftKeyDown and IsShiftKeyDown() then
+                -- TODO(next task): send the quest link to chat. Swallow the click
+                -- until then so it cannot fall through to the map/log handlers.
+                return
+            end
+            if q.id then ns.Main:FocusQuest(q.id) end
+            return
+        end
         if button == "RightButton" then
             -- Silent when there is nothing to jump to: the tooltip does not
             -- advertise the action in that case either, so a message here would
