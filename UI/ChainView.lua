@@ -557,11 +557,10 @@ local function acquireCard(f, i)
     return card
 end
 
--- Handing the player over to another view (world map pin / native quest log) always
--- takes our own window out of the way. It is closed BEFORE the handover runs: if the
--- handover bails out half way on a client quirk, the panel would otherwise sit on top
--- of whatever opened behind it. A deferred second pass covers clients that re-show
--- the window from their own panel code.
+-- Handing the player over to the world map always takes our own window out of the
+-- way. It is closed BEFORE the handover runs: if the handover bails out half way on
+-- a client quirk, the panel would otherwise sit on top of whatever opened behind it.
+-- A deferred second pass covers clients that re-show the window from their own code.
 local function closeMain()
     ns.Tooltip.Hide()
     local f = ns.Main and ns.Main.frame
@@ -755,27 +754,26 @@ local function paintRow(view, row, item, selectedId, rightReserve)
     fav:Show()
 
     row:SetScript("OnClick", function(_, button)
+        local shift = IsShiftKeyDown and IsShiftKeyDown() or false
+        local ctrl = IsControlKeyDown and IsControlKeyDown() or false
+
         -- Pinned quick-find rows ("current quests" / "favorite quests") are query
-        -- aids, not browsable pages. They expose exactly two gestures: Shift+Left
-        -- sends the quest link to chat (implemented in a later task), and a plain
-        -- Left jumps back to the quest's real category page / source entry. All
-        -- chain-navigation gestures (right-click pre/post, map pin, native log)
-        -- are deliberately absent here.
+        -- aids, not browsable pages. The only gesture is a plain Left, which jumps
+        -- back to the quest's real category page / source entry. Everything else
+        -- is swallowed.
         if item.flat then
-            if button == "RightButton" then return end
-            if IsShiftKeyDown and IsShiftKeyDown() then
-                -- TODO(next task): send the quest link to chat. Swallow the click
-                -- until then so it cannot fall through to the map/log handlers.
-                return
-            end
+            if button == "RightButton" or shift then return end
             if q.id then ns.Main:FocusQuest(q.id) end
             return
         end
-        if button == "RightButton" then
-            -- Silent when there is nothing to jump to: the tooltip does not
-            -- advertise the action in that case either, so a message here would
-            -- be the only feedback for something the player was never offered.
-            if IsShiftKeyDown and IsShiftKeyDown() then
+
+        -- Ctrl+Left jumps to the prerequisite, Ctrl+Right to the follow-up. A plain
+        -- Right click (or Shift+Right) is a deliberate no-op now. As before, a
+        -- missing target is swallowed silently: the tooltip only advertises the
+        -- jump when the edge exists, so a message here would answer an offer the
+        -- player was never given.
+        if ctrl then
+            if button == "RightButton" then
                 local post = ns.Chains.PostJumpTarget(q, item.chainSet)
                 if post then ns.Main:FocusQuest(post.id) end
             else
@@ -784,20 +782,10 @@ local function paintRow(view, row, item, selectedId, rightReserve)
             end
             return
         end
-        -- Shift+click is the "hand this quest to the native log" shortcut, and it
-        -- only makes sense for a quest the player is actually on. Done, merely
-        -- acceptable and locked quests have nothing to select in the log, so the
-        -- click is swallowed silently instead of popping a "not in log" warning.
-        if IsShiftKeyDown and IsShiftKeyDown() then
-            if not ns.Q.Active(q.id) then return end
-            closeMain()
-            if not ns.Q.OpenInLog(q.id) then
-                ns.Print(ns.L["Quest not in log"])
-            end
-            ns.selectedQuest = q.id
-            ns.ChainView.Update(view, view.lastRows, q.id)
-            return
-        end
+        if button == "RightButton" then return end
+        -- Shift+Left is a deliberate no-op: sending quest links to chat was removed.
+        if shift then return end
+
         -- Item-started quests pin the item / object that opens the quest, not the NPC
         -- turn-in that QuestieDB also lists as a starter.
         local loc = q.startLoc or q.loc

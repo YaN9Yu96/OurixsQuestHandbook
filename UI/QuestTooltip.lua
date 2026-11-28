@@ -20,8 +20,8 @@ end
 -- hintMode controls the click-hint footer: nil = the normal chain-page hints;
 -- "none" = no hints (the NPC companion panel is a read-only view, so advertising
 -- "left-click marks the map" there would describe something that no longer happens);
--- "flat" = a single "left-click jumps to the source page" hint for the pinned
--- quick-find lists, whose rows have only that one gesture.
+-- "flat" = the pinned quick-find lists' two hints (jump to the source page and
+-- send the quest link to chat). Both row kinds share the Shift+left link hint.
 
 -- Keep the list short enough that the tooltip never grows past the screen; a quest with
 -- a dozen prerequisites reports the remainder instead of wrapping into a wall of text.
@@ -255,13 +255,10 @@ function T.Show(owner, q, item, hintMode)
         -- the gate name, which is more useful than a row that visibly marks a dependency
         -- and then swallows the click.
         if hintMode ~= "flat" and ns.Chains.PreJumpTarget(q, item and item.chainSet) then
-            hints[#hints + 1] = ns.L["Right-click: jump to previous"]
+            hints[#hints + 1] = ns.L["Ctrl+left-click: jump to previous"]
         end
         if hintMode ~= "flat" and ns.Chains.PostJumpTarget(q, item and item.chainSet) then
-            hints[#hints + 1] = ns.L["Shift+right-click: jump to follow-up"]
-        end
-        if hintMode ~= "flat" and ns.Q.Active(q.id) then
-            hints[#hints + 1] = ns.L["Shift+Click: open quest log"]
+            hints[#hints + 1] = ns.L["Ctrl+right-click: jump to follow-up"]
         end
         if #hints > 0 then
             tt:AddLine(" ")

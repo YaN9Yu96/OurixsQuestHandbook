@@ -19,8 +19,8 @@ ns.Q = Q
 
 -- One log row, from whichever API this client actually implements. The legacy flat
 -- returns (GetQuestLogTitle) and the 8.0+ table form (C_QuestLog.GetInfo) are both
--- tried: on this client the legacy function exists but can answer nothing, which is
--- exactly how Shift+click used to conclude "not in log" for a freshly accepted quest.
+-- tried: on this client the legacy function exists but can answer nothing, so the
+-- table form is the reliable source on modern clients.
 local function logLine(index)
     if type(GetQuestLogTitle) == "function" then
         local ok, title, level, _, isHeader, _, isComplete, _, questID =
@@ -409,85 +409,15 @@ function Q.NativeLink(id)
         if ok and type(link) == "string" and link ~= "" then return link end
     end
     -- Classic clients sometimes have no GetQuestLink for quests outside the
-    -- log. The quest: hyperlink format is native, so build it directly.
+    -- log. The quest: hyperlink format is native, so build it directly. This is
+    -- only ever handed to GameTooltip:SetHyperlink for a local native tooltip;
+    -- it is never sent to chat (the client would strip it to plain text).
     local name = Q.Title(id, nil)
     local level = Q.Level(id, nil) or 1
     if name and name ~= "" then
         return ("|cffffff00|Hquest:%d:%d|h[%s]|h|r"):format(id, level, name)
     end
     return nil
-end
-
--- The native quest log container, named differently across client generations.
-local function questLogFrame()
-    local f = _G.QuestLogFrame
-    if type(f) == "table" and f.IsShown then return f end
-    local log = _G.QuestLog
-    if type(log) == "table" and log.frame then return log.frame end
-    return nil
-end
-
-local function showQuestLog()
-    local f = questLogFrame()
-    if f and f.IsShown and f:IsShown() then return true, f end
-    if f then
-        if type(_G.ShowUIPanel) == "function" then pcall(_G.ShowUIPanel, f) end
-        if (not f.IsShown or not f:IsShown()) and type(f.Show) == "function" then
-            pcall(f.Show, f)
-        end
-        if not f.IsShown or f:IsShown() then return true, f end
-    end
-    if type(_G.ToggleQuestLog) == "function" then
-        local ok = pcall(_G.ToggleQuestLog)
-        if ok and (not f or not f.IsShown or f:IsShown()) then return true, true end
-    end
-    return false, f
-end
-
--- Open the native quest log on a specific quest. Different clients expose wildly
--- different ways of doing this, so every known shape is tried in order and only a path
--- that actually exists is used.
--- Returns (found, shown): "found" answers "is this quest in the log", "shown" reports
--- whether the native panel is actually on screen, so the caller only closes its own
--- window when there is something behind it.
-function Q.OpenInLog(id)
-    if not id then return false, false end
-
-    -- 1) Clients with a direct helper.
-    if type(_G.QuestLog_OpenToQuest) == "function" then
-        local ok, res = pcall(_G.QuestLog_OpenToQuest, id)
-        if ok and res ~= false then return true, true end
-    end
-    if _G.C_QuestLog and type(_G.C_QuestLog.OpenQuestLogToQuest) == "function" then
-        local ok, res = pcall(_G.C_QuestLog.OpenQuestLogToQuest, id)
-        if ok and res ~= false then return true, true end
-    end
-
-    -- 2) "In the log" and "has a log index" are separate questions: the client can
-    -- answer the first while exposing no index at all. Only a quest that the client
-    -- denies knowing is reported as missing.
-    local index = logIndex(id)
-    local onQuest = Q.Active(id)
-    if not index and not onQuest then return false, false end
-
-    if QL.SetSelectedQuest then pcall(QL.SetSelectedQuest, id) end
-    if index then
-        if type(_G.QuestLog_SetSelection) == "function" then
-            pcall(_G.QuestLog_SetSelection, index)
-        end
-        if type(_G.SelectQuestLogEntry) == "function" then
-            pcall(_G.SelectQuestLogEntry, index)
-        end
-    end
-
-    local shown, frame = showQuestLog()
-    if index and frame and type(frame.SelectQuestLogEntry) == "function" then
-        pcall(frame.SelectQuestLogEntry, frame, index)
-    end
-
-    if type(_G.QuestLog_Update) == "function" then pcall(_G.QuestLog_Update) end
-    if type(_G.QuestLogFrame_Update) == "function" then pcall(_G.QuestLogFrame_Update) end
-    return true, shown
 end
 
 function Q.PlayerLevel()
