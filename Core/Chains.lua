@@ -783,14 +783,17 @@ function C.BuildView(entryId, faction, filter)
         local key = out[1].id
         local chainSet = {}
         for _, q in ipairs(out) do chainSet[q.id] = true end
+        -- Always emit the WHOLE chain, folded or not. Collapse is a view concern: the
+        -- ChainView hides the tail rows and shrinks the card. Keeping the row set stable
+        -- means a fold/unfold never changes the page key, so the view can relayout the
+        -- existing frames in place instead of rebuilding the whole page.
         local isCollapsed = collapsedMap[key] and true or false
-        local visible = isCollapsed and { out[1] } or out
-        local n = #visible
-        for i, q in ipairs(visible) do
+        local n = #out
+        for i, q in ipairs(out) do
             rows[#rows + 1] = {
                 q = q,
                 chain = chainIndex, chainIndex = chainIndex, chainKey = key,
-                chainSet = chainSet, chainCount = #out,
+                chainSet = chainSet, chainCount = n,
                 isStart = i == 1, isEnd = i == n, single = n == 1,
                 collapsed = (i == 1 and isCollapsed) or nil,
                 indent = i > 1,
@@ -848,7 +851,7 @@ function C.StatusLabel(q, item)
             return (q and q.faction and ns.L[q.faction]) or ns.L["Locked"]
         end
         if flags.level then
-            return ns.L["Requires level %d"]:format(flags.level)
+            return ns.L["Level too low"]
         end
         if flags.pre then return ns.L["Requires prerequisite"] end
     end

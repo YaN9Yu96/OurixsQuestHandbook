@@ -188,10 +188,9 @@ function T.Show(owner, q, item, readOnly)
         tt:AddLine(prefix .. ns.Q.Title(q.id, nil), 1, 0.82, 0, true)
     end
 
-    -- One compact line: status, or the short reason why it is locked.
-    local status = ns.Chains.Status(q, item)
-    local r, g, b = ns.Q.StatusColor(status)
-    tt:AddLine(ns.Chains.StatusLabel(q, item), r, g, b)
+    -- The quest's own state line is intentionally omitted: between the native
+    -- "Requirements" block and the blocks below there is no duplicate status text --
+    -- "已完成 / 进行中 / 可接取 / 不能接取" all live in the list row, not the tooltip.
 
     -- Which quests have to be done first, and where each one stands right now.
     addPrerequisites(tt, q)
@@ -208,7 +207,11 @@ function T.Show(owner, q, item, readOnly)
     if q.minLevel or markLoc or hasStartItems then
         sectionHeader(tt, ns.L["Accept conditions"])
         if q.minLevel then
-            tt:AddLine(ns.L["Accept at Lv.%d"]:format(q.minLevel), 0.62, 0.68, 0.76)
+            -- Show the actual level, greyed out while the player is still too low.
+            local enough = ns.Q.PlayerLevel() >= q.minLevel
+            local lr, lg, lb = enough and 0.62 or 0.45,
+                enough and 0.68 or 0.43, enough and 0.76 or 0.41
+            tt:AddLine(ns.L["Accept at Lv.%d"]:format(q.minLevel), lr, lg, lb)
         end
         if hasStartItems then
             for _, itemId in ipairs(startItems) do
@@ -230,10 +233,14 @@ function T.Show(owner, q, item, readOnly)
 
     tt:AddLine(ns.L["Data origin"] .. ": " .. ns.L["QuestieDB"], 0.55, 0.62, 0.70)
     if not readOnly then
+        -- Collect the applicable hints first: one blank line goes in front of the FIRST
+        -- hint only, so they read as a single footer paragraph, and a tooltip with no
+        -- applicable hint never ends on a stray empty line.
+        local hints = {}
         -- Only offer the pin when there is somewhere to pin: an item-started quest with
         -- a known drop spot qualifies, a quest with no coordinates at all does not.
         if markLoc then
-            tt:AddLine(ns.L["Left-click: mark start on map"], 0.55, 0.62, 0.70)
+            hints[#hints + 1] = ns.L["Left-click: mark start on map"]
         end
         -- Offer the jump whenever the edge exists AND it is outside the current chain (an
         -- in-chain parent is already on the spine, so it needs neither hint nor action).
@@ -241,13 +248,19 @@ function T.Show(owner, q, item, readOnly)
         -- the gate name, which is more useful than a row that visibly marks a dependency
         -- and then swallows the click.
         if ns.Chains.PreJumpTarget(q, item and item.chainSet) then
-            tt:AddLine(ns.L["Right-click: jump to previous"], 0.55, 0.62, 0.70)
+            hints[#hints + 1] = ns.L["Right-click: jump to previous"]
         end
         if ns.Chains.PostJumpTarget(q, item and item.chainSet) then
-            tt:AddLine(ns.L["Shift+right-click: jump to follow-up"], 0.55, 0.62, 0.70)
+            hints[#hints + 1] = ns.L["Shift+right-click: jump to follow-up"]
         end
         if ns.Q.Active(q.id) then
-            tt:AddLine(ns.L["Shift+Click: open quest log"], 0.55, 0.62, 0.70)
+            hints[#hints + 1] = ns.L["Shift+Click: open quest log"]
+        end
+        if #hints > 0 then
+            tt:AddLine(" ")
+            for _, text in ipairs(hints) do
+                tt:AddLine(text, 0.55, 0.62, 0.70)
+            end
         end
     end
     tt:Show()

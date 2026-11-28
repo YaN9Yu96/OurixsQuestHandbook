@@ -56,6 +56,32 @@ local function hex(r, g, b)
         math.floor(g * 255 + 0.5), math.floor(b * 255 + 0.5))
 end
 
+-- Right-side status column geometry. The status font is a fraction of the normal
+-- (title) font, and BOTH the column width and the badge strip's starting point are
+-- derived from that font instead of being frozen numbers. The old hardcoded 112px
+-- column / 124px badge start were sized for a 9-point status font; once the font size
+-- changes those numbers drift, which is why the badge start must be recomputed here.
+local STATUS_FONT_RATIO = 0.8   -- status = 0.8 x the normal (title) font size
+local STATUS_INSET = 8          -- status right edge, inset from the row's right edge
+local STATUS_GAP = 4            -- gap between the status column and the first badge
+local STATUS_PX_PER_POINT = 112 / 9  -- px-per-point the original 112px column was tuned for
+local STATUS_FONT_SIZE, STATUS_W    -- derived once, on first row creation
+
+local function statusMetrics(titleFont)
+    if STATUS_W then return end
+    local size = 12
+    local font = titleFont
+    if not font and UIParent then
+        font = UIParent:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    end
+    if font and font.GetFont then
+        local ok, _, s = pcall(font.GetFont, font)
+        if ok and type(s) == "number" and s > 0 then size = s end
+    end
+    STATUS_FONT_SIZE = math.max(6, math.floor(size * STATUS_FONT_RATIO + 0.5))
+    STATUS_W = math.floor(STATUS_FONT_SIZE * STATUS_PX_PER_POINT + 0.5)
+end
+
 function V.Create(parent)
     local f = W.Panel(parent)
     local sf = W.Scroll(f)
@@ -510,9 +536,19 @@ local function acquire(f, i)
     row.title = W.Font(row, "GameFontNormal")
     row.title:SetJustifyH("LEFT")
     if row.title.SetWordWrap then pcall(row.title.SetWordWrap, row.title, false) end
+    statusMetrics(row.title)  -- derive status font size / column width from the title font
     row.status = W.Font(row, "GameFontHighlightSmall")
+    -- 0.8x the normal (title) font size, keeping the small template's face / colour /
+    -- flags. GetFont -> SetFont is the client-agnostic way to resize a template font
+    -- string without losing what the template gave us.
+    if row.status.GetFont then
+        local ok, path, _, flags = pcall(row.status.GetFont, row.status)
+        if ok and path then
+            pcall(row.status.SetFont, row.status, path, STATUS_FONT_SIZE, flags or "")
+        end
+    end
     row.status:SetJustifyH("RIGHT")
-    row.status:SetWidth(112)
+    row.status:SetWidth(STATUS_W)
 
     row.tags = {}
     row.rewardIcons = {}
@@ -563,6 +599,7 @@ end
 -- Everything that has to be written on one row. Split out of the layout pass so a single
 -- quest can be repainted in place when its title arrives asynchronously.
 local function paintRow(view, row, item, selectedId, rightReserve)
+    statusMetrics()  -- ensure derived column width exists even on an early repaint path
     local TH = W.Theme
     local q = item.q
     row.quest, row.item = q, item
@@ -576,8 +613,11 @@ local function paintRow(view, row, item, selectedId, rightReserve)
     row:SetHeight(h)
     row.bg:SetVertexColor(TH.rowSel[1], TH.rowSel[2], TH.rowSel[3], row.selected and 0.9 or 0)
 
+    -- A folded chain's first row is visually a lone node: suppress the downward line
+    -- that would otherwise dangle into a hidden tail row.
+    local foldHead = item.collapsed and item.isStart
     local top = item.lineTop and 0 or CENTER
-    local bottom = item.lineBottom and h or CENTER
+    local bottom = (item.lineBottom and not foldHead) and h or CENTER
     if bottom > top then
         row.trunk:ClearAllPoints()
         row.trunk:SetPoint("TOPLEFT", row, "TOPLEFT", TRUNK_X, -top)
@@ -694,14 +734,18 @@ local function paintRow(view, row, item, selectedId, rightReserve)
     -- sit at the row's tail. The status column, badge strip, reward strip and title all
     -- follow the same shift, so their relative spacing never changes.
     local tailShift = rightReserve + STAR_W + STAR_GAP
-    local badgeX = -(124 + tailShift)
+    -- First badge starts one gap LEFT of the status column's left edge. The status column
+    -- is STATUS_W wide and its right edge is STATUS_INSET in from the row, so the anchor is
+    -- STATUS_INSET + STATUS_W + STATUS_GAP -- derived, never a frozen 124.
+    local badgeAnchor = STATUS_INSET + STATUS_W + STATUS_GAP
+    local badgeX = -(badgeAnchor + tailShift)
     for _, b in ipairs(tags) do
         b:ClearAllPoints()
         b:SetPoint("RIGHT", row, "RIGHT", badgeX, 0)
         b:Show()
-        badgeX = badgeX - (b:GetWidth() or 40) - 4
+        badgeX = badgeX - (b:GetWidth() or 40) - STATUS_GAP
     end
-    local tagsW = (-badgeX - 4) - (124 + tailShift)
+    local tagsW = (-badgeX - STATUS_GAP) - (badgeAnchor + tailShift)
     if tagsW < 0 then tagsW = 0 end
 
     -- Reward icons: to the LEFT of the badge strip (right edge sits 4px left of the
@@ -721,7 +765,7 @@ local function paintRow(view, row, item, selectedId, rightReserve)
     row.title:SetPoint("RIGHT", row, "RIGHT", titleRight, 0)
     row.title:SetText(head .. hex(sr, sg, sb) .. name .. "|r" .. meta)
     row.status:ClearAllPoints()
-    row.status:SetPoint("RIGHT", row, "RIGHT", -(8 + tailShift), 0)
+    row.status:SetPoint("RIGHT", row, "RIGHT", -(STATUS_INSET + tailShift), 0)
     row.status:SetText(hex(sr, sg, sb) .. ns.Chains.StatusLabel(q, item) .. "|r")
 
     -- Favourite star at the very tail of the row (right of the status column).
@@ -798,22 +842,35 @@ local function buildPlan(view, rows, selectedId)
     for gi, g in ipairs(groups) do
         if gi > 1 then y = y + GAP end
         local cardY = y
-        local cardH = #g.items * ROW_H + PAD * 2
         local first = g.items[1]
+        -- Fold state lives on the first item (set by Chains.BuildView). A folded chain
+        -- shows only its first row: the card shrinks to one row and the tail rows are
+        -- marked hidden. The row set itself is unchanged, so folding never alters the
+        -- page key and never forces a full rebuild.
+        local folded = first.collapsed and true or false
+        local shownRows = folded and 1 or #g.items
+        local cardH = shownRows * ROW_H + PAD * 2
         -- The fold button sits on the card's top-right corner, i.e. 20px wide ending
         -- 6px inside the row's right edge. Every right-aligned column (status, badge,
         -- title) must therefore reserve that strip, otherwise the status text runs
         -- straight underneath the button.
         local foldShown = first.isStart and not first.search and (first.chainCount or 0) > 1
+        -- Every row reserves the fold button's strip whether or not a button is actually
+        -- drawn, so the right-aligned status / badges share one edge across the whole
+        -- list -- including standalone rows that carry no fold button at all.
+        local rightReserve = 30
         plan[#plan + 1] = {
             kind = "card", gi = gi, cardY = cardY, cardH = cardH,
-            foldShown = foldShown, first = first,
-            rightReserve = foldShown and 30 or 0,
+            foldShown = foldShown, first = first, folded = folded,
+            rightReserve = rightReserve,
         }
         for ci, item in ipairs(g.items) do
             plan[#plan + 1] = {
                 kind = "row", item = item, rowY = cardY + PAD + (ci - 1) * ROW_H,
-                rightReserve = foldShown and 30 or 0,
+                -- Hidden tail rows still occupy a plan slot so their frames exist and can
+                -- be shown in place on unfold; only the first row survives a fold.
+                foldHidden = folded and ci > 1 or false,
+                rightReserve = rightReserve,
             }
         end
         y = cardY + cardH
@@ -833,15 +890,11 @@ local function buildOne(view, e, selectedId)
         card.fold:ClearAllPoints()
         card.fold:SetPoint("TOPRIGHT", card, "TOPRIGHT", -8, -PAD - 1)
         if e.foldShown then
-            local first = e.first
-            card.fold:SetLabel(first.collapsed and "+" or "-")
-            card.fold:SetSelected(first.collapsed and true or false)
+            card.fold:SetLabel(e.folded and "+" or "-")
+            card.fold:SetSelected(e.folded and true or false)
             card.fold:Show()
             card.fold:SetScript("OnClick", function()
-                ns.char.chainCollapsed = ns.char.chainCollapsed or {}
-                ns.char.chainCollapsed[first.chainKey] =
-                    not ns.char.chainCollapsed[first.chainKey]
-                ns.Refresh()
+                V:ToggleFold(view, e.gi)
             end)
         else
             card.fold:Hide()
@@ -855,7 +908,7 @@ local function buildOne(view, e, selectedId)
     row:SetPoint("TOPRIGHT", child, "TOPRIGHT", -14, -e.rowY)
     row.y = e.rowY
     paintRow(view, row, e.item, selectedId, e.rightReserve)
-    row:Show()
+    row:SetShown(not e.foldHidden)
     view.ids[#view.ids + 1] = e.item.q.id
     view.rowPlan[view.rowCount] = e
 end
@@ -991,7 +1044,8 @@ function V:Update(rows, selectedId)
         for i = 1, self.rowCount do
             local e = self.rowPlan[i]
             if e and self.rows[i] then
-                self.rows[i]:Show()
+                -- Folded tail rows must stay hidden even on an in-place repaint.
+                self.rows[i]:SetShown(not e.foldHidden)
                 paintRow(self, self.rows[i], e.item, selectedId, e.rightReserve)
             end
         end
@@ -1010,6 +1064,53 @@ end
 
 -- The window-open rebuild is handled by V:Update + V:OnHide: OnHide clears the page and
 -- marks it incomplete, so the next V:Update on open starts a fresh C_Timer build.
+
+-- Fold/unfold one chain IN PLACE. The row set never changes on a fold (BuildView emits
+-- the whole chain either way), so the existing frames can be reused 1:1: only the card
+-- height, the +/- button, and the tail rows' visibility change. No frame is destroyed,
+-- no batch ticker / loading animation runs, and the scroll offset is preserved. This is
+-- the whole point of the change -- a fold used to call ns.Refresh() and rebuild the page.
+function V:ToggleFold(view, gi)
+    view = view or self
+    if view.building or not view.complete or not view.rowPlan then return end
+    local cardEntry
+    for _, e in ipairs(view.plan or {}) do
+        if e.kind == "card" and e.gi == gi then cardEntry = e break end
+    end
+    if not cardEntry or not cardEntry.first then return end
+    local first = cardEntry.first
+    local key = first.chainKey
+    if not key then return end
+
+    -- Flip the persisted state and mirror it onto the in-memory row items so the
+    -- recomputed plan sees the new fold flag.
+    ns.char.chainCollapsed = ns.char.chainCollapsed or {}
+    local nowFolded = not (ns.char.chainCollapsed[key] and true or false)
+    if nowFolded then ns.char.chainCollapsed[key] = true else ns.char.chainCollapsed[key] = nil end
+    for _, item in ipairs(view.lastRows or {}) do
+        if item.chainKey == key then
+            item.collapsed = (item.isStart and nowFolded) or nil
+        end
+    end
+
+    -- Recompute the plan from the (unchanged) row set; only fold flags differ.
+    local plan, totalH = buildPlan(view, view.lastRows, view.selectedId)
+    view.plan, view.planHeight = plan, totalH
+
+    -- Remember the scroll offset, then repaint every entry onto the SAME frames.
+    local sf = view.scroll
+    local top = sf.GetVerticalScroll and sf:GetVerticalScroll() or 0
+    view.rowCount, view.cardCount = 0, 0
+    view.ids, view.rowPlan = {}, {}
+    for _, e in ipairs(plan) do
+        if e.kind == "card" then view.cardCount = (view.cardCount or 0) + 1 end
+        buildOne(view, e, view.selectedId)
+    end
+    local child = sf.child
+    child:SetHeight(math.max(1, totalH + 8))
+    if sf.UpdateThumb then sf:UpdateThumb() end
+    if sf.SetVerticalScroll then sf:SetVerticalScroll(top) end
+end
 
 -- Repaint the rows of one quest in place, without touching the rest of the page. Used
 -- when a quest's title arrives from the client mid-session.
