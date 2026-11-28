@@ -93,6 +93,9 @@ end
 -- an icon shows the native item tooltip (GameTooltip) -- no text in the row itself.
 
 local ICON, RGAP = 16, 3
+-- Favorite star at the tail of every handbook row. Text glyphs (★ / ☆) are used instead
+-- of a texture so it renders identically on every client this addon targets.
+local STAR_W, STAR_GAP = 22, 4
 -- Native Blizzard icons used for the two non-item rewards: a rune for experience and
 -- the client's own coin textures for money. All are core client assets, never another
 -- addon's. Money is tiered by magnitude so the icon reads like the amount: copper below
@@ -344,6 +347,62 @@ local function ensureRewardIcon(row, i)
         GameTooltip:Hide()
     end)
     icons[i] = btn
+    return btn
+end
+
+-- Favorite star button: a lazily created child of the row, toggled on click. Kept on the
+-- row (not the card) so every quest line has its own star, and rebuilt with the row on a
+-- full page rebuild. Glyph state and colour are set in paintRow from ns.char.favorites.
+local function ensureFavButton(row)
+    if row.fav then return row.fav end
+    local btn = CreateFrame("Button", nil, row)
+    btn:SetSize(STAR_W, ROW_H - 4)
+    btn:RegisterForClicks("LeftButtonUp")
+    btn:SetFrameLevel((row:GetFrameLevel() or 1) + 2)
+    local glyph = W.Font(btn, "GameFontNormal")
+    glyph:SetPoint("CENTER", btn, "CENTER", 0, 0)
+    -- Enlarge the glyph: the default normal font renders ★/☆ too small to read at a glance.
+    if glyph.GetFont then
+        local ok, path, _, flags = pcall(glyph.GetFont, glyph)
+        if ok and path then pcall(glyph.SetFont, glyph, path, 20, flags or "") end
+    end
+    btn.glyph = glyph
+    btn:SetScript("OnEnter", function()
+        local TH = W.Theme
+        if row.bg then
+            row.bg:SetVertexColor(TH.rowHover[1], TH.rowHover[2], TH.rowHover[3], 0.85)
+        end
+        local tt = GameTooltip
+        tt:SetOwner(btn, "ANCHOR_RIGHT")
+        tt:ClearLines()
+        local q = row.quest
+        tt:AddLine(ns.L[ns.IsFavorite(q and q.id) and "Remove favorite" or "Add favorite"], 1, 0.82, 0)
+        if q then
+            local name = ns.Q.FastTitle(q.id, q.titleFallback)
+            tt:AddLine("|cffffffff" .. (name or "") .. "|r")
+        end
+        tt:Show()
+    end)
+    btn:SetScript("OnLeave", function()
+        local TH = W.Theme
+        if row.bg then
+            row.bg:SetVertexColor(TH.rowSel[1], TH.rowSel[2], TH.rowSel[3],
+                row.selected and 0.9 or 0)
+        end
+        GameTooltip:Hide()
+    end)
+    btn:SetScript("OnClick", function()
+        local q = row.quest
+        if not q then return end
+        ns.ToggleFavorite(q.id)
+        -- Repaint just this one star instead of a full page rebuild; the flat
+        -- "favorites" page (feature 3) will do its own refresh when it exists.
+        local on = ns.IsFavorite(q.id)
+        glyph:SetText(on and "★" or "☆")
+        glyph:SetTextColor(on and 1 or 0.55, on and 0.82 or 0.58, on and 0 or 0.65, 1)
+        ns.Refresh()
+    end)
+    row.fav = btn
     return btn
 end
 
@@ -631,14 +690,18 @@ local function paintRow(view, row, item, selectedId, rightReserve)
             tags[#tags + 1] = pill
         end
     end
-    local badgeX = -(124 + rightReserve)
+    -- Everything on the right shifts left by one star column so the favourite toggle can
+    -- sit at the row's tail. The status column, badge strip, reward strip and title all
+    -- follow the same shift, so their relative spacing never changes.
+    local tailShift = rightReserve + STAR_W + STAR_GAP
+    local badgeX = -(124 + tailShift)
     for _, b in ipairs(tags) do
         b:ClearAllPoints()
         b:SetPoint("RIGHT", row, "RIGHT", badgeX, 0)
         b:Show()
         badgeX = badgeX - (b:GetWidth() or 40) - 4
     end
-    local tagsW = (-badgeX - 4) - (124 + rightReserve)
+    local tagsW = (-badgeX - 4) - (124 + tailShift)
     if tagsW < 0 then tagsW = 0 end
 
     -- Reward icons: to the LEFT of the badge strip (right edge sits 4px left of the
@@ -658,8 +721,17 @@ local function paintRow(view, row, item, selectedId, rightReserve)
     row.title:SetPoint("RIGHT", row, "RIGHT", titleRight, 0)
     row.title:SetText(head .. hex(sr, sg, sb) .. name .. "|r" .. meta)
     row.status:ClearAllPoints()
-    row.status:SetPoint("RIGHT", row, "RIGHT", -(8 + rightReserve), 0)
+    row.status:SetPoint("RIGHT", row, "RIGHT", -(8 + tailShift), 0)
     row.status:SetText(hex(sr, sg, sb) .. ns.Chains.StatusLabel(q, item) .. "|r")
+
+    -- Favourite star at the very tail of the row (right of the status column).
+    local fav = ensureFavButton(row)
+    fav:ClearAllPoints()
+    fav:SetPoint("RIGHT", row, "RIGHT", -(4 + rightReserve), 0)
+    local favOn = ns.IsFavorite(q.id)
+    fav.glyph:SetText(favOn and "★" or "☆")
+    fav.glyph:SetTextColor(favOn and 1 or 0.55, favOn and 0.82 or 0.58, favOn and 0 or 0.65, 1)
+    fav:Show()
 
     row:SetScript("OnClick", function(_, button)
         if button == "RightButton" then

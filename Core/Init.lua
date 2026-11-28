@@ -14,6 +14,32 @@ function ns.Print(msg)
     end
 end
 
+-- Favorites are plain quest-id keys in per-character storage. No quest data is copied
+-- here, so quests added by a database update become favouritable with no addon change.
+function ns.IsFavorite(id)
+    return id ~= nil and ns.char ~= nil and ns.char.favorites ~= nil
+        and ns.char.favorites[id] == true
+end
+
+function ns.ToggleFavorite(id)
+    if not id then return end
+    ns.char.favorites = ns.char.favorites or {}
+    if ns.char.favorites[id] then
+        ns.char.favorites[id] = nil
+    else
+        ns.char.favorites[id] = true
+    end
+end
+
+-- Ids the player starred, in no particular order; view builders decide sorting/filtering.
+function ns.FavoriteQuestIds()
+    local out = {}
+    for id in pairs(ns.char and ns.char.favorites or {}) do
+        out[#out + 1] = id
+    end
+    return out
+end
+
 local function applyDefaults()
     _G.OurixsQuestHandbookDB = _G.OurixsQuestHandbookDB or {}
     _G.OurixsQuestHandbookCharDB = _G.OurixsQuestHandbookCharDB or {}
@@ -27,6 +53,7 @@ local function applyDefaults()
     ns.char.collected = nil -- legacy self-collected data is intentionally dropped
     ns.char.collapsed = ns.char.collapsed or {}
     ns.char.chainCollapsed = ns.char.chainCollapsed or {}
+    ns.char.favorites = ns.char.favorites or {}
     if ns.char.npcPanel == nil then ns.char.npcPanel = true end
     if ns.char.showAllClasses == nil then ns.char.showAllClasses = false end
     if ns.char.showAllRaces == nil then ns.char.showAllRaces = false end
