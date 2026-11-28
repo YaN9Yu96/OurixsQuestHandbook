@@ -132,6 +132,7 @@ function M.Create()
     f.hideBtn:SetPoint("RIGHT", f.factionBtn, "LEFT", -8, 0)
     f.hideBtn:SetScript("OnClick", function()
         ns.char.hideCompleted = not ns.char.hideCompleted
+        ns.focusQuestId = nil
         M:Refresh()
         M:ResetScroll()
     end)
@@ -153,6 +154,10 @@ function M.Create()
         text = text or ""
         if text == ns.search then return end
         ns.search = text
+        -- A real search means the player is browsing again: drop the single-quest
+        -- jump exemption. The programmatic clear below sets ns.search first, so its
+        -- deferred applySearch("") returns at the guard above and keeps the exemption.
+        ns.focusQuestId = nil
         M:Refresh()
         M:ResetScroll()
     end
@@ -183,6 +188,17 @@ function M.Create()
         applySearch(searchText)
     end)
     f.search:SetScript("OnEditFocusGained", function() f.searchHint:Hide() end)
+
+    -- Clear the search field without firing the debounced apply chain: cancel any
+    -- pending timer, reset the model and the widget together. Used by a chain jump so
+    -- the target quest is not hidden behind a stale query.
+    function M:ClearSearch()
+        searchSeq = searchSeq + 1
+        searchText = ""
+        ns.search = ""
+        if f.search then f.search:SetText("") end
+        if f.searchHint then f.searchHint:SetShown(true) end
+    end
 
     f.tree = ns.Tree.Create(f)
     f.tree:SetPoint("TOPLEFT", f, "TOPLEFT", 4, -48)
@@ -315,6 +331,8 @@ end
 -- expand/collapse state. Only the quest list scrolls back to the top.
 function M:SelectEntry(id)
     if not id then return end
+    -- Manual navigation ends the single-quest jump exemption.
+    ns.focusQuestId = nil
     local f = self.frame
     ns.selectedEntry = id
     ns.selectedQuest = nil
@@ -350,6 +368,10 @@ local JUMP_REFUSED = {
 }
 function M:FocusQuest(id)
     if not id then return end
+    -- A jump lands on the quest the player clicked, so clear any stale search and
+    -- exempt this one quest from every filter. Neither changes a saved user setting.
+    if self.ClearSearch then self:ClearSearch() end
+    ns.focusQuestId = id
     local target = ns.Source.Get(id)
     if not target then
         ns.Print(ns.L["Cannot jump: target is filtered out"])
@@ -409,6 +431,7 @@ function M:SetFaction(faction)
     -- Also reachable from the options panel while the window is closed, after the index
     -- may have been released; rebuild before touching byId / entries.
     if ns.EnsureData then ns.EnsureData() end
+    ns.focusQuestId = nil
     ns.faction = faction
     ns.char.faction = faction
     local entry = ns.Source.byId and ns.Source.byId[ns.selectedEntry]

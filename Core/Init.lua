@@ -38,6 +38,8 @@ local function applyDefaults()
     ns.faction = ns.char.faction
     ns.search = ""
     ns.selectedQuest = nil
+    -- Transient single-quest filter exemption set by a chain jump. Never persisted.
+    ns.focusQuestId = nil
 end
 
 -- Default page: the player's own faction and the map they are standing on.

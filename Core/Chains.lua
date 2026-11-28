@@ -403,6 +403,17 @@ function C.NotMineTags(q)
     return out
 end
 
+-- Jump exemption. FocusQuest sets ns.focusQuestId to the quest it is landing on; that
+-- one quest bypasses EVERY filter (faction / race / class / done) so a jump can never
+-- land on an empty page. It is transient view state, NOT a user setting -- no ns.char
+-- value is ever changed. Every gate goes through C.Bypass so a single quest can be
+-- revealed without altering what the player configured.
+function C.Bypass(id)
+    if not id or not ns.focusQuestId then return false end
+    if type(id) == "table" then id = id.id end
+    return id == ns.focusQuestId
+end
+
 -- Faction, class and race gating. Class-only quests of other classes never show, and
 -- neither do race-locked quests the player's race cannot take -- except in the other
 -- faction's tab, which is an inspection view (see C.Inspecting): every quest listed
@@ -411,6 +422,7 @@ end
 -- Returns nil when the quest passes, or the name of the gate that stopped it.
 local function viewGate(q, faction)
     if not q then return "missing" end
+    if C.Bypass(q) then return nil end
     if q.faction and q.faction ~= faction then
         return "faction"
     end
@@ -429,6 +441,13 @@ function C.Visible(q, faction)
 end
 
 function C.EntryAllowed(e)
+    -- A jump target must stay reachable even if its page is a class-gated one: the
+    -- entry carrying the exempt quest passes the gate without changing any setting.
+    if e then
+        for _, id in ipairs(e.quests or {}) do
+            if C.Bypass(id) then return true end
+        end
+    end
     if e.cat == "classes" and e.classKey and not C.ShowAllClasses() then
         local pc = C.PlayerClass()
         if pc and e.classKey ~= pc then return false end
@@ -445,7 +464,7 @@ end
 function C.HiddenReason(q, faction)
     local why = viewGate(q, faction or ns.faction)
     if why then return why end
-    if ns.char and ns.char.hideCompleted and ns.Q.Done(q.id) then return "done" end
+    if ns.char and ns.char.hideCompleted and ns.Q.Done(q.id) and not C.Bypass(q) then return "done" end
     return nil
 end
 
@@ -510,8 +529,10 @@ function C.Progress(entry, faction, actives)
     -- The two inspection switches change what counts as acceptable, and they are not
     -- log events, so they belong in the key as well.
     local relax = (C.ShowAllClasses() and 1 or 0) + (ns.char and ns.char.showAllRaces and 2 or 0)
+    local focus = ns.focusQuestId or 0
     local hit = entry.id and progressCache[entry.id]
-    if hit and hit.stamp == stamp and hit.faction == faction and hit.relax == relax then
+    if hit and hit.stamp == stamp and hit.faction == faction and hit.relax == relax
+        and hit.focus == focus then
         return hit.done, hit.total, hit.state
     end
     local done, total = 0, 0
@@ -540,7 +561,7 @@ function C.Progress(entry, faction, actives)
     end
     if entry.id then
         progressCache[entry.id] = {
-            stamp = stamp, faction = faction, relax = relax,
+            stamp = stamp, faction = faction, relax = relax, focus = focus,
             done = done, total = total, state = state,
         }
     end
@@ -698,7 +719,7 @@ function C.BuildView(entryId, faction, filter)
     local quests, byId = {}, {}
     local hideDone = ns.char and ns.char.hideCompleted
     for _, q in ipairs(visible) do
-        if not (hideDone and ns.Q.Done(q.id)) then
+        if not (hideDone and ns.Q.Done(q.id)) or C.Bypass(q) then
             quests[#quests + 1] = q
             byId[q.id] = q
         end
